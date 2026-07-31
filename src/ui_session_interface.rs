@@ -8,13 +8,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-#[cfg(all(target_os = "windows", not(feature = "flutter")))]
-use hbb_common::config::keys;
 #[cfg(not(feature = "flutter"))]
 use hbb_common::fs;
 use hbb_common::{
     allow_err,
-    config::{Config, LocalConfig, PeerConfig},
+    config::{keys, Config, LocalConfig, PeerConfig},
     get_version_number, log,
     message_proto::*,
     rendezvous_proto::ConnType,
@@ -507,6 +505,35 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg));
     }
 
+    pub fn save_video_profile(
+        &self,
+        profile_type: String,
+        rate_mode: String,
+        min_kbps: u32,
+        target_kbps: u32,
+        max_kbps: u32,
+        min_fps: u32,
+        max_fps: u32,
+        target_fps: u32,
+    ) {
+        let msg = self.lc.write().unwrap().save_video_profile(
+            &profile_type,
+            &rate_mode,
+            min_kbps,
+            target_kbps,
+            max_kbps,
+            min_fps,
+            max_fps,
+            target_fps,
+        );
+        self.send(Data::Message(msg));
+    }
+
+    pub fn get_video_profile_json(&self) -> String {
+        let profile = self.lc.read().unwrap().get_video_profile(1920, 1080);
+        serde_json::to_string(&profile).unwrap_or_default()
+    }
+
     pub fn get_remember(&self) -> bool {
         self.lc.read().unwrap().remember
     }
@@ -646,7 +673,32 @@ impl<T: InvokeUiSession> Session<T> {
         if k.eq("remote_dir") {
             v = lc.get_all_remote_dir(v);
         }
-        lc.set_option(k, v);
+        lc.set_option(k.clone(), v);
+        // When HQ video options change, push a full OptionMessage so the peer applies them.
+        if matches!(
+            k.as_str(),
+            keys::OPTION_VIDEO_PROFILE
+                | keys::OPTION_RATE_CONTROL_MODE
+                | keys::OPTION_MIN_BITRATE
+                | keys::OPTION_TARGET_BITRATE
+                | keys::OPTION_MAX_BITRATE
+                | keys::OPTION_MIN_FPS
+                | keys::OPTION_MAX_FPS
+                | keys::OPTION_MAX_QUEUE_MS
+                | keys::OPTION_ENABLE_HQ_VIDEO
+                | keys::OPTION_CHROMA_PREFERENCE
+        ) {
+            if lc.is_hq_video_enabled() {
+                let profile = lc.get_video_profile(1920, 1080);
+                let mut misc = Misc::new();
+                misc.set_option(lc.build_video_profile_option_message(&profile));
+                let mut msg_out = Message::new();
+                msg_out.set_misc(misc);
+                drop(lc);
+                self.send(Data::Message(msg_out));
+                return;
+            }
+        }
     }
 
     #[inline]
@@ -1895,6 +1947,22 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             self.update_quality_status(QualityStatus {
                 delay: Some(t.last_delay as _),
                 target_bitrate: Some(t.target_bitrate as _),
+                queue_delay_ms: if t.queue_delay_ms > 0 {
+                    Some(t.queue_delay_ms)
+                } else {
+                    None
+                },
+                fallback_reason: if t.fallback_reason.is_empty() {
+                    None
+                } else {
+                    Some(t.fallback_reason.clone())
+                },
+                qos_state: if t.qos_state.is_empty() {
+                    None
+                } else {
+                    Some(t.qos_state.clone())
+                },
+                hardware: Some(t.hardware),
                 ..Default::default()
             });
             handle_test_delay(t, peer).await;

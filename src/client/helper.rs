@@ -13,6 +13,10 @@ pub struct QualityStatus {
     pub target_bitrate: Option<i32>,
     pub codec_format: Option<CodecFormat>,
     pub chroma: Option<String>,
+    pub queue_delay_ms: Option<u32>,
+    pub fallback_reason: Option<String>,
+    pub qos_state: Option<String>,
+    pub hardware: Option<bool>,
 }
 
 #[inline]

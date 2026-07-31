@@ -2305,6 +2305,17 @@ impl LoginConfigHandler {
             msg.disable_clipboard = BoolOption::Yes.into();
         }
         msg.supported_decoding = MessageField::some(self.get_supported_decoding());
+        // Attach HQ video profile fields when enabled (ignored by old peers).
+        if self.is_hq_video_enabled() {
+            let profile = self.get_video_profile(1920, 1080);
+            msg.video_profile_type = profile.profile_type.to_proto();
+            msg.rate_control_mode = profile.rate.mode.to_proto();
+            msg.min_bitrate_kbps = profile.rate.min_kbps;
+            msg.target_bitrate_kbps = profile.rate.target_kbps;
+            msg.max_bitrate_kbps = profile.rate.max_kbps;
+            msg.min_fps = profile.rate.min_fps;
+            msg.max_fps = profile.rate.max_fps;
+        }
         Some(msg)
     }
 
@@ -2480,6 +2491,170 @@ impl LoginConfigHandler {
         }
         *self.custom_fps.lock().unwrap() = Some(fps as _);
         msg_out
+    }
+
+    fn option_or_default(&self, key: &str) -> String {
+        let v = self.get_option(key);
+        if v.is_empty() {
+            hbb_common::config::UserDefaultConfig::load().get(key)
+        } else {
+            v
+        }
+    }
+
+    /// Build a VideoProfile from current peer options / defaults.
+    pub fn get_video_profile(&self, width: u32, height: u32) -> hbb_common::video_profile::VideoProfile {
+        use hbb_common::video_profile::*;
+        let profile_type =
+            VideoProfileType::from_str_or_default(&self.option_or_default(keys::OPTION_VIDEO_PROFILE));
+        if profile_type != VideoProfileType::Custom {
+            return VideoProfile::for_type(profile_type, width, height);
+        }
+        let mut p = VideoProfile::default();
+        p.profile_type = VideoProfileType::Custom;
+        p.rate.mode = RateControlMode::from_str_or_default(
+            &self.option_or_default(keys::OPTION_RATE_CONTROL_MODE),
+        );
+        p.rate.min_kbps = self
+            .option_or_default(keys::OPTION_MIN_BITRATE)
+            .parse()
+            .unwrap_or(2000);
+        p.rate.target_kbps = self
+            .option_or_default(keys::OPTION_TARGET_BITRATE)
+            .parse()
+            .unwrap_or(4000);
+        p.rate.max_kbps = self
+            .option_or_default(keys::OPTION_MAX_BITRATE)
+            .parse()
+            .unwrap_or(8000);
+        p.rate.min_fps = self
+            .option_or_default(keys::OPTION_MIN_FPS)
+            .parse()
+            .unwrap_or(5);
+        p.rate.max_fps = self
+            .option_or_default(keys::OPTION_MAX_FPS)
+            .parse()
+            .unwrap_or(60);
+        p.rate.target_fps = self
+            .option_or_default(keys::OPTION_CUSTOM_FPS)
+            .parse()
+            .unwrap_or(30);
+        p.rate.max_queue_ms = self
+            .option_or_default(keys::OPTION_MAX_QUEUE_MS)
+            .parse()
+            .unwrap_or(150);
+        p.chroma = ChromaPreference::from_str_or_default(
+            &self.option_or_default(keys::OPTION_CHROMA_PREFERENCE),
+        );
+        p.preferred_codec = CodecPreference::from_str_or_default(
+            &self.option_or_default(keys::OPTION_CODEC_PREFERENCE),
+        );
+        p.allow_codec_fallback =
+            self.option_or_default(keys::OPTION_ALLOW_CODEC_FALLBACK) != "N";
+        p.rate = p.rate.clamp();
+        p
+    }
+
+    /// Whether HQ video profile negotiation is enabled.
+    pub fn is_hq_video_enabled(&self) -> bool {
+        self.option_or_default(keys::OPTION_ENABLE_HQ_VIDEO) == "Y"
+    }
+
+    /// Save video profile options and return an OptionMessage for the peer.
+    pub fn save_video_profile(
+        &mut self,
+        profile_type: &str,
+        rate_mode: &str,
+        min_kbps: u32,
+        target_kbps: u32,
+        max_kbps: u32,
+        min_fps: u32,
+        max_fps: u32,
+        target_fps: u32,
+    ) -> Message {
+        use hbb_common::video_profile::*;
+        let mut config = self.load_config();
+        config
+            .options
+            .insert(keys::OPTION_VIDEO_PROFILE.to_owned(), profile_type.to_owned());
+        config
+            .options
+            .insert(keys::OPTION_RATE_CONTROL_MODE.to_owned(), rate_mode.to_owned());
+        config
+            .options
+            .insert(keys::OPTION_MIN_BITRATE.to_owned(), min_kbps.to_string());
+        config
+            .options
+            .insert(keys::OPTION_TARGET_BITRATE.to_owned(), target_kbps.to_string());
+        config
+            .options
+            .insert(keys::OPTION_MAX_BITRATE.to_owned(), max_kbps.to_string());
+        config
+            .options
+            .insert(keys::OPTION_MIN_FPS.to_owned(), min_fps.to_string());
+        config
+            .options
+            .insert(keys::OPTION_MAX_FPS.to_owned(), max_fps.to_string());
+        config
+            .options
+            .insert(keys::OPTION_CUSTOM_FPS.to_owned(), target_fps.to_string());
+        config
+            .options
+            .insert(keys::OPTION_ENABLE_HQ_VIDEO.to_owned(), "Y".to_owned());
+
+        // Also map to legacy fields so old peers still get a usable quality.
+        let pt = VideoProfileType::from_str_or_default(profile_type);
+        let profile = if pt == VideoProfileType::Custom {
+            let mut p = VideoProfile::default();
+            p.profile_type = pt;
+            p.rate.mode = RateControlMode::from_str_or_default(rate_mode);
+            p.rate.min_kbps = min_kbps;
+            p.rate.target_kbps = target_kbps;
+            p.rate.max_kbps = max_kbps;
+            p.rate.min_fps = min_fps;
+            p.rate.max_fps = max_fps;
+            p.rate.target_fps = target_fps;
+            p.rate = p.rate.clamp();
+            p
+        } else {
+            VideoProfile::for_type(pt, 1920, 1080)
+        };
+        config.image_quality = profile.to_legacy_image_quality().to_owned();
+        if config.image_quality == "custom" {
+            config.custom_image_quality = vec![profile.to_legacy_custom_quality_percent()];
+        }
+        self.save_config(config);
+        *self.custom_fps.lock().unwrap() = Some(target_fps as _);
+
+        let mut misc = Misc::new();
+        misc.set_option(self.build_video_profile_option_message(&profile));
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        msg_out
+    }
+
+    fn build_video_profile_option_message(
+        &self,
+        profile: &hbb_common::video_profile::VideoProfile,
+    ) -> OptionMessage {
+        let mut msg = OptionMessage::new();
+        // Legacy fields for old peers
+        if let Some(q) = self.get_image_quality_enum(profile.to_legacy_image_quality(), false) {
+            msg.image_quality = q.into();
+        } else {
+            msg.custom_image_quality = profile.to_legacy_custom_quality_percent() << 8;
+            msg.custom_fps = profile.rate.target_fps as i32;
+        }
+        // New HQ fields
+        msg.video_profile_type = profile.profile_type.to_proto();
+        msg.rate_control_mode = profile.rate.mode.to_proto();
+        msg.min_bitrate_kbps = profile.rate.min_kbps;
+        msg.target_bitrate_kbps = profile.rate.target_kbps;
+        msg.max_bitrate_kbps = profile.rate.max_kbps;
+        msg.min_fps = profile.rate.min_fps;
+        msg.max_fps = profile.rate.max_fps;
+        msg.custom_fps = profile.rate.target_fps as i32;
+        msg
     }
 
     pub fn get_option(&self, k: &str) -> String {

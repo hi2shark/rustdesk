@@ -537,6 +537,39 @@ pub fn session_set_custom_fps(session_id: SessionID, fps: i32) {
     }
 }
 
+pub fn session_set_video_profile(
+    session_id: SessionID,
+    profile_type: String,
+    rate_mode: String,
+    min_kbps: u32,
+    target_kbps: u32,
+    max_kbps: u32,
+    min_fps: u32,
+    max_fps: u32,
+    target_fps: u32,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.save_video_profile(
+            profile_type,
+            rate_mode,
+            min_kbps,
+            target_kbps,
+            max_kbps,
+            min_fps,
+            max_fps,
+            target_fps,
+        );
+    }
+}
+
+pub fn session_get_video_profile(session_id: SessionID) -> String {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.get_video_profile_json()
+    } else {
+        String::new()
+    }
+}
+
 pub fn session_get_trackpad_speed(session_id: SessionID) -> Option<i32> {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         Some(session.get_trackpad_speed())

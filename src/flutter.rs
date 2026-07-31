@@ -727,6 +727,21 @@ impl InvokeUiSession for FlutterHandler {
                     &status.codec_format.map_or(NULL, |it| it.to_string()),
                 ),
                 ("chroma", &status.chroma.map_or(NULL, |it| it.to_string())),
+                (
+                    "queue_delay",
+                    &status
+                        .queue_delay_ms
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "fallback_reason",
+                    &status.fallback_reason.map_or(NULL, |it| it),
+                ),
+                ("qos_state", &status.qos_state.map_or(NULL, |it| it)),
+                (
+                    "hardware",
+                    &status.hardware.map_or(NULL, |it| it.to_string()),
+                ),
             ],
             &[],
         );
