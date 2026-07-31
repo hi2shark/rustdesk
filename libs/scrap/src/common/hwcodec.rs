@@ -76,10 +76,11 @@ impl EncoderApi for HwRamEncoder {
                 bitrate = Self::check_bitrate_range(&config, bitrate);
                 let gop = config
                     .keyframe_interval
-                    .unwrap_or_else(|| {
-                        // Low-latency default: ~3s GOP at configured FPS
-                        let fps = config.fps.unwrap_or(DEFAULT_FPS) as usize;
-                        fps.saturating_mul(3).max(30)
+                    .unwrap_or_else(|| match config.fps {
+                        // HQ path passes fps explicitly → low-latency ~3s GOP.
+                        Some(fps) => (fps as usize).saturating_mul(3).max(30),
+                        // Non-HQ callers leave fps unset → keep legacy DEFAULT_GOP.
+                        None => DEFAULT_GOP as usize,
                     }) as i32;
                 let fps = config.fps.unwrap_or(DEFAULT_FPS);
                 let ctx = EncodeContext {
@@ -229,8 +230,8 @@ impl EncoderApi for HwRamEncoder {
 
     fn request_keyframe(&mut self) -> ResultType<()> {
         self.force_keyframe = true;
-        // Many hw encoders expose force IDR via set_bitrate trick or dedicated API;
-        // mark flag for encode path consumers and try set_bitrate refresh.
+        // Best-effort only: the hwcodec crate exposes set_bitrate but no force-IDR API.
+        // supports_force_keyframe remains false; QoS relies on periodic GOP refresh.
         let _ = self.encoder.set_bitrate(self.bitrate as _);
         Ok(())
     }
@@ -266,6 +267,7 @@ impl EncoderApi for HwRamEncoder {
             supports_444: false,
             supports_dynamic_bitrate: self.support_changing_quality(),
             supports_low_latency: true,
+            supports_force_keyframe: false,
             max_width: self.config.width as u32,
             max_height: self.config.height as u32,
             max_fps: 120,

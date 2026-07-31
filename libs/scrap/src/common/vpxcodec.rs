@@ -287,6 +287,7 @@ impl EncoderApi for VpxEncoder {
             supports_444: self.id == VpxVideoCodecId::VP9,
             supports_dynamic_bitrate: true,
             supports_low_latency: true,
+            supports_force_keyframe: true,
             max_width: self.width as u32,
             max_height: self.height as u32,
             max_fps: 120,

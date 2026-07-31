@@ -195,15 +195,15 @@ impl EncoderApi for VRamEncoder {
                 self.bitrate = bitrate;
             }
         }
-        self.ctx.d.framerate = cfg.target_fps as i32;
-        // Low-latency GOP ~3 seconds
-        self.ctx.d.gop = (cfg.target_fps * 3).max(30) as i32;
+        // Runtime framerate is supported via set_framerate; GOP is fixed at encoder
+        // creation and cannot be changed without rebuilding the encoder.
+        let _ = self.encoder.set_framerate(cfg.target_fps as i32);
         Ok(())
     }
 
     fn request_keyframe(&mut self) -> ResultType<()> {
-        // Refresh bitrate to nudge some encoders toward IDR; full force-IDR
-        // depends on vendor API availability in hwcodec crate.
+        // Best-effort only: hwcodec vram path has no force-IDR API.
+        // supports_force_keyframe remains false (trait default); rely on GOP refresh.
         let _ = self.encoder.set_bitrate(self.bitrate as _);
         Ok(())
     }
