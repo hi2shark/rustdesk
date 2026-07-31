@@ -14,6 +14,10 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+-[0-9]+"
       - "[0-9]+.[0-9]+.[0-9]+-[0-9]+"
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build-desktop:
     uses: ./.github/workflows/flutter-build-desktop.yml
