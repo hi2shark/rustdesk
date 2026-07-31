@@ -37,6 +37,8 @@ env:
   # 2. Update the `VCPKG_COMMIT_ID` in `ci.yml` and `playground.yml`.
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 2025.01.13, got "/opt/artifacts/vcpkg/vcpkg: No such file or directory" with latest version
+  # Fallback when upload-tag is non-semver (e.g. nightly).
+  # Overridden by "Sync version from tag" from TAG_NAME / Cargo.toml.
   VERSION: "1.4.8"
   NDK_VERSION: "r28c"
   #signing keys env variable checks
@@ -110,6 +112,10 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - name: Sync version from tag
+        shell: bash
+        run: bash .github/scripts/sync-version-from-tag.sh
 
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -400,6 +406,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Sync version from tag
+        shell: bash
+        run: bash .github/scripts/sync-version-from-tag.sh
+
       - name: Install LLVM and Clang
         uses: rustdesk-org/install-llvm-action-32bit@6aa7d9ad3df84dff01cd4596dd0fc880a7f47fce # no release tag; commit 2026-05-26
         with:
@@ -555,6 +565,10 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - name: Sync version from tag
+        shell: bash
+        run: bash .github/scripts/sync-version-from-tag.sh
 
       - name: Import the codesign cert
         if: env.MACOS_P12_BASE64 != null
@@ -746,6 +760,16 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ inputs.upload-artifact }}
     steps:
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          VER="${TAG_NAME#v}"
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]]; then
+            VER="${VERSION}"
+          fi
+          echo "VERSION=$VER" >> "$GITHUB_ENV"
+          echo "Using VERSION=$VER (TAG_NAME='$TAG_NAME')"
+
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -829,6 +853,10 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - name: Sync version from tag
+        shell: bash
+        run: bash .github/scripts/sync-version-from-tag.sh
 
       - name: Set Swap Space
         if: ${{ matrix.job.arch == 'x86_64' }}
@@ -1160,6 +1188,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Sync version from tag
+        shell: bash
+        run: bash .github/scripts/sync-version-from-tag.sh
+
       - name: Modify vcpkg.json for armv7
         if: matrix.job.vcpkg-triplet == 'arm-linux'
         run: |
@@ -1362,6 +1394,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Sync version from tag
+        shell: bash
+        run: bash .github/scripts/sync-version-from-tag.sh
+
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1435,6 +1471,10 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - name: Sync version from tag
+        shell: bash
+        run: bash .github/scripts/sync-version-from-tag.sh
 
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
