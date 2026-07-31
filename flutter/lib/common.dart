@@ -46,6 +46,7 @@ import 'package:flutter_hbb/native/win32.dart'
 import 'package:flutter_hbb/native/common.dart'
     if (dart.library.html) 'package:flutter_hbb/web/common.dart';
 import 'package:flutter_hbb/utils/http_service.dart' as http;
+import 'mobile/widgets/dialog.dart' show showServerSettings;
 
 final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
@@ -2546,6 +2547,24 @@ connect(BuildContext context, String id,
     String? connToken,
     bool? isSharedPassword}) async {
   if (id == '') return;
+  // Block outgoing connect until a self-hosted ID/Relay Server is configured.
+  if (await bind.mainIsUsingPublicServer()) {
+    gFFI.dialogManager.show((setState, close, ctx) {
+      return CustomAlertDialog(
+        title: Text(translate('ID/Relay Server')),
+        content: Text(translate('must_setup_server_tip')),
+        actions: [
+          dialogButton('Cancel', onPressed: close, isOutline: true),
+          dialogButton('OK', onPressed: () {
+            close();
+            showServerSettings(gFFI.dialogManager, null);
+          }),
+        ],
+        onCancel: close,
+      );
+    });
+    return;
+  }
   if (!isDesktop || desktopType == DesktopType.main) {
     try {
       if (Get.isRegistered<IDTextEditingController>()) {
@@ -3693,24 +3712,13 @@ Widget loadPowered(BuildContext context) {
   if (bind.mainGetBuildinOption(key: "hide-powered-by-me") == 'Y') {
     return SizedBox.shrink();
   }
-  return MouseRegion(
-    cursor: SystemMouseCursors.click,
-    child: GestureDetector(
-      onTap: () {
-        launchUrl(Uri.parse('https://rustdesk.com'));
-      },
-      child: Opacity(
-          opacity: 0.5,
-          child: Text(
-            translate("powered_by_me"),
-            overflow: TextOverflow.clip,
-            style: Theme.of(context)
-                .textTheme
-                .bodySmall
-                ?.copyWith(fontSize: 9, decoration: TextDecoration.underline),
-          )),
-    ),
-  ).marginOnly(top: 6);
+  return Opacity(
+      opacity: 0.5,
+      child: Text(
+        translate("powered_by_me"),
+        overflow: TextOverflow.clip,
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 9),
+      )).marginOnly(top: 6);
 }
 
 const _kDefaultLogoAsset = 'assets/logo.png';
