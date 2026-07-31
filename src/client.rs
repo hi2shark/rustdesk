@@ -2306,8 +2306,11 @@ impl LoginConfigHandler {
         }
         msg.supported_decoding = MessageField::some(self.get_supported_decoding());
         // Attach HQ video profile fields when enabled (ignored by old peers).
+        // Before peer_info is known (first login option message), fall back to 1080p
+        // bitrate tiers; the server re-resolves named presets from its real display size.
         if self.is_hq_video_enabled() {
-            let profile = self.get_video_profile(1920, 1080);
+            let (w, h) = self.peer_display_size();
+            let profile = self.get_video_profile(w, h);
             msg.video_profile_type = profile.profile_type.to_proto();
             msg.rate_control_mode = profile.rate.mode.to_proto();
             msg.min_bitrate_kbps = profile.rate.min_kbps;
@@ -2502,6 +2505,25 @@ impl LoginConfigHandler {
         }
     }
 
+    /// Current peer display size for HQ bitrate tier selection.
+    /// Falls back to 1080p when peer_info is not yet available.
+    pub fn peer_display_size(&self) -> (u32, u32) {
+        if let Some(pi) = self.peer_info.as_ref() {
+            let idx = pi.current_display as usize;
+            if let Some(d) = pi.displays.get(idx) {
+                if d.width > 0 && d.height > 0 {
+                    return (d.width as u32, d.height as u32);
+                }
+            }
+            if let Some(d) = pi.displays.first() {
+                if d.width > 0 && d.height > 0 {
+                    return (d.width as u32, d.height as u32);
+                }
+            }
+        }
+        (1920, 1080)
+    }
+
     /// Build a VideoProfile from current peer options / defaults.
     pub fn get_video_profile(&self, width: u32, height: u32) -> hbb_common::video_profile::VideoProfile {
         use hbb_common::video_profile::*;
@@ -2571,6 +2593,9 @@ impl LoginConfigHandler {
         min_fps: u32,
         max_fps: u32,
         target_fps: u32,
+        max_queue_ms: u32,
+        chroma: &str,
+        allow_codec_fallback: bool,
     ) -> Message {
         use hbb_common::video_profile::*;
         let mut config = self.load_config();
@@ -2600,9 +2625,24 @@ impl LoginConfigHandler {
             .insert(keys::OPTION_CUSTOM_FPS.to_owned(), target_fps.to_string());
         config
             .options
+            .insert(keys::OPTION_MAX_QUEUE_MS.to_owned(), max_queue_ms.to_string());
+        config
+            .options
+            .insert(keys::OPTION_CHROMA_PREFERENCE.to_owned(), chroma.to_owned());
+        config.options.insert(
+            keys::OPTION_ALLOW_CODEC_FALLBACK.to_owned(),
+            if allow_codec_fallback {
+                "Y".to_owned()
+            } else {
+                "N".to_owned()
+            },
+        );
+        config
+            .options
             .insert(keys::OPTION_ENABLE_HQ_VIDEO.to_owned(), "Y".to_owned());
 
         // Also map to legacy fields so old peers still get a usable quality.
+        let (w, h) = self.peer_display_size();
         let pt = VideoProfileType::from_str_or_default(profile_type);
         let profile = if pt == VideoProfileType::Custom {
             let mut p = VideoProfile::default();
@@ -2614,10 +2654,13 @@ impl LoginConfigHandler {
             p.rate.min_fps = min_fps;
             p.rate.max_fps = max_fps;
             p.rate.target_fps = target_fps;
+            p.rate.max_queue_ms = max_queue_ms;
+            p.chroma = ChromaPreference::from_str_or_default(chroma);
+            p.allow_codec_fallback = allow_codec_fallback;
             p.rate = p.rate.clamp();
             p
         } else {
-            VideoProfile::for_type(pt, 1920, 1080)
+            VideoProfile::for_type(pt, w, h)
         };
         config.image_quality = profile.to_legacy_image_quality().to_owned();
         if config.image_quality == "custom" {
@@ -2633,7 +2676,7 @@ impl LoginConfigHandler {
         msg_out
     }
 
-    fn build_video_profile_option_message(
+    pub fn build_video_profile_option_message(
         &self,
         profile: &hbb_common::video_profile::VideoProfile,
     ) -> OptionMessage {

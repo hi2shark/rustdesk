@@ -547,6 +547,9 @@ pub fn session_set_video_profile(
     min_fps: u32,
     max_fps: u32,
     target_fps: u32,
+    max_queue_ms: u32,
+    chroma: String,
+    allow_codec_fallback: bool,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.save_video_profile(
@@ -558,6 +561,9 @@ pub fn session_set_video_profile(
             min_fps,
             max_fps,
             target_fps,
+            max_queue_ms,
+            chroma,
+            allow_codec_fallback,
         );
     }
 }

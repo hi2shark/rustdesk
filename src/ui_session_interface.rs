@@ -515,6 +515,9 @@ impl<T: InvokeUiSession> Session<T> {
         min_fps: u32,
         max_fps: u32,
         target_fps: u32,
+        max_queue_ms: u32,
+        chroma: String,
+        allow_codec_fallback: bool,
     ) {
         let msg = self.lc.write().unwrap().save_video_profile(
             &profile_type,
@@ -525,12 +528,17 @@ impl<T: InvokeUiSession> Session<T> {
             min_fps,
             max_fps,
             target_fps,
+            max_queue_ms,
+            &chroma,
+            allow_codec_fallback,
         );
         self.send(Data::Message(msg));
     }
 
     pub fn get_video_profile_json(&self) -> String {
-        let profile = self.lc.read().unwrap().get_video_profile(1920, 1080);
+        let lc = self.lc.read().unwrap();
+        let (w, h) = lc.peer_display_size();
+        let profile = lc.get_video_profile(w, h);
         serde_json::to_string(&profile).unwrap_or_default()
     }
 
@@ -687,9 +695,11 @@ impl<T: InvokeUiSession> Session<T> {
                 | keys::OPTION_MAX_QUEUE_MS
                 | keys::OPTION_ENABLE_HQ_VIDEO
                 | keys::OPTION_CHROMA_PREFERENCE
+                | keys::OPTION_ALLOW_CODEC_FALLBACK
         ) {
             if lc.is_hq_video_enabled() {
-                let profile = lc.get_video_profile(1920, 1080);
+                let (w, h) = lc.peer_display_size();
+                let profile = lc.get_video_profile(w, h);
                 let mut misc = Misc::new();
                 misc.set_option(lc.build_video_profile_option_message(&profile));
                 let mut msg_out = Message::new();
