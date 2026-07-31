@@ -91,6 +91,10 @@ pub fn notify_video_frame_fetched(display_idx: usize, conn_id: i32, frame_tm: Op
     if let Some(notifier) = FRAME_FETCHED_NOTIFIERS.lock().unwrap().get(&display_idx) {
         notifier.0.send((conn_id, frame_tm)).ok();
     }
+    // Feed HQ QoS queue-delay estimator.
+    if frame_tm.is_some() {
+        VIDEO_QOS.lock().unwrap().on_video_frame_fetched();
+    }
 }
 
 #[inline]
@@ -113,6 +117,9 @@ pub fn notify_video_frame_fetched_by_conn_id(conn_id: i32, frame_tm: Option<Inst
         if let Some(notifier) = notifiers.get(&display_idx) {
             notifier.0.send((conn_id, frame_tm)).ok();
         }
+    }
+    if frame_tm.is_some() {
+        VIDEO_QOS.lock().unwrap().on_video_frame_fetched();
     }
 }
 
@@ -593,7 +600,12 @@ fn run(vs: VideoService) -> ResultType<()> {
     ) {
         Ok(result) => result,
         Err(err) => {
-            log::error!("Failed to create encoder: {err:?}, fallback to VP9");
+            let reason = format!("encoder create failed: {err:?}, fallback to VP9");
+            log::error!("{reason}");
+            VIDEO_QOS
+                .lock()
+                .unwrap()
+                .set_encoder_fallback_reason(reason);
             Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
                 height: c.height as _,
@@ -998,6 +1010,21 @@ fn get_encoder_config(
                     height: c.height,
                     quality,
                     keyframe_interval,
+                    fps: VIDEO_QOS
+                        .lock()
+                        .unwrap()
+                        .hq_rate_config()
+                        .map(|r| r.target_fps as i32),
+                    min_bitrate_kbps: VIDEO_QOS
+                        .lock()
+                        .unwrap()
+                        .hq_rate_config()
+                        .map(|r| r.min_kbps),
+                    max_bitrate_kbps: VIDEO_QOS
+                        .lock()
+                        .unwrap()
+                        .hq_rate_config()
+                        .map(|r| r.max_kbps),
                 });
             }
             EncoderCfg::VPX(VpxEncoderConfig {
@@ -1154,12 +1181,47 @@ fn handle_one_frame(
     let mut send_conn_ids: HashSet<i32> = Default::default();
     let first = *first_frame;
     *first_frame = false;
+
+    // HQ bounded-queue protection: if QoS asked to drop old frames, request IDR
+    // and skip encoding this (stale) frame so the next capture is fresher.
+    {
+        let mut qos = VIDEO_QOS.lock().unwrap();
+        if qos.take_drop_old_frames() {
+            allow_err!(encoder.request_keyframe());
+            log::info!("HQ drop old frames: skip encode, request keyframe");
+            // Clear pending accounting
+            while qos.pending_video_bytes() > 0 {
+                qos.on_video_frame_fetched();
+            }
+            return Ok(send_conn_ids);
+        }
+        if let Some(rate) = qos.hq_rate_config() {
+            let max_bytes = (rate.max_kbps as u64 * rate.max_queue_ms as u64 / 8) as u32;
+            if max_bytes > 0 && qos.pending_video_bytes() > max_bytes {
+                allow_err!(encoder.request_keyframe());
+                qos.take_drop_old_frames(); // clear flag if set
+                while qos.pending_video_bytes() > 0 {
+                    qos.on_video_frame_fetched();
+                }
+                log::info!(
+                    "HQ queue over byte limit ({} > {}), skip encode",
+                    qos.pending_video_bytes(),
+                    max_bytes
+                );
+                return Ok(send_conn_ids);
+            }
+        }
+    }
+
     match encoder.encode_to_message(frame, ms) {
         Ok(mut vf) => {
             *encode_fail_counter = 0;
             vf.display = display as _;
             let mut msg = Message::new();
             msg.set_video_frame(vf);
+            // Estimate frame size for queue accounting
+            let frame_bytes = msg.write_to_bytes().map(|b| b.len() as u32).unwrap_or(0);
+            VIDEO_QOS.lock().unwrap().on_frame_enqueue(frame_bytes);
             recorder
                 .lock()
                 .unwrap()
@@ -1322,10 +1384,18 @@ fn check_qos(
 ) -> ResultType<()> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     *spf = video_qos.spf();
+    if video_qos.take_need_keyframe() {
+        allow_err!(encoder.request_keyframe());
+        log::info!("HQ QoS requested keyframe");
+    }
     if *ratio != video_qos.ratio() {
         *ratio = video_qos.ratio();
         if encoder.support_changing_quality() {
-            allow_err!(encoder.set_quality(*ratio));
+            if let Some(rate) = video_qos.hq_rate_config().cloned() {
+                allow_err!(encoder.set_rate_control(&rate));
+            } else {
+                allow_err!(encoder.set_quality(*ratio));
+            }
             video_qos.store_bitrate(encoder.bitrate());
         } else {
             // Now only vaapi doesn't support changing quality
@@ -1343,6 +1413,16 @@ fn check_qos(
         *second_instant = Instant::now();
         video_qos.update_display_data(&name, *send_counter);
         *send_counter = 0;
+        if video_qos.hq_enabled() {
+            log::info!(
+                "HQ stats: state={:?}, kbps={}, fps={}, queue_delay={}ms, pending_bytes={}",
+                video_qos.hq_state(),
+                video_qos.current_kbps(),
+                video_qos.fps(),
+                video_qos.last_queue_delay_ms(),
+                video_qos.pending_video_bytes()
+            );
+        }
     }
     drop(video_qos);
     Ok(())

@@ -1073,11 +1073,17 @@ impl Connection {
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
                         conn.last_test_delay = Some(Instant::now());
                         let mut msg_out = Message::new();
+                        let qos = video_service::VIDEO_QOS.lock().unwrap();
                         msg_out.set_test_delay(TestDelay{
                             last_delay: conn.network_delay,
-                            target_bitrate: video_service::VIDEO_QOS.lock().unwrap().bitrate(),
+                            target_bitrate: qos.bitrate(),
+                            queue_delay_ms: qos.last_queue_delay_ms(),
+                            fallback_reason: qos.encoder_fallback_reason().to_owned(),
+                            qos_state: qos.hq_state().as_str().to_owned(),
+                            hardware: false,
                             ..Default::default()
                         });
+                        drop(qos);
                         conn.send(msg_out.into()).await;
                     }
                     if conn.is_authed_remote_conn() || conn.view_camera {
@@ -4362,6 +4368,77 @@ impl Connection {
                 .lock()
                 .unwrap()
                 .user_custom_fps(self.inner.id(), o.custom_fps as _);
+        }
+        // HQ video profile / advanced rate control (new fields, 0 = unset)
+        if o.video_profile_type > 0
+            || o.target_bitrate_kbps > 0
+            || o.rate_control_mode > 0
+        {
+            use hbb_common::video_profile::*;
+            if let Some(pt) = VideoProfileType::from_proto(o.video_profile_type) {
+                let mut profile = if pt == VideoProfileType::Custom {
+                    let mut p = VideoProfile::default();
+                    p.profile_type = pt;
+                    if let Some(mode) = RateControlMode::from_proto(o.rate_control_mode) {
+                        p.rate.mode = mode;
+                    }
+                    if o.min_bitrate_kbps > 0 {
+                        p.rate.min_kbps = o.min_bitrate_kbps;
+                    }
+                    if o.target_bitrate_kbps > 0 {
+                        p.rate.target_kbps = o.target_bitrate_kbps;
+                    }
+                    if o.max_bitrate_kbps > 0 {
+                        p.rate.max_kbps = o.max_bitrate_kbps;
+                    }
+                    if o.min_fps > 0 {
+                        p.rate.min_fps = o.min_fps;
+                    }
+                    if o.max_fps > 0 {
+                        p.rate.max_fps = o.max_fps;
+                    }
+                    if o.custom_fps > 0 {
+                        p.rate.target_fps = o.custom_fps as u32;
+                    }
+                    p.rate = p.rate.clamp();
+                    p
+                } else {
+                    VideoProfile::for_type(pt, 1920, 1080)
+                };
+                let _ = &mut profile;
+                video_service::VIDEO_QOS
+                    .lock()
+                    .unwrap()
+                    .user_video_profile(self.inner.id(), profile);
+            } else if o.target_bitrate_kbps > 0 {
+                // Partial HQ fields without profile type → treat as custom
+                let mut p = VideoProfile::default();
+                p.profile_type = VideoProfileType::Custom;
+                if let Some(mode) = RateControlMode::from_proto(o.rate_control_mode) {
+                    p.rate.mode = mode;
+                }
+                if o.min_bitrate_kbps > 0 {
+                    p.rate.min_kbps = o.min_bitrate_kbps;
+                }
+                p.rate.target_kbps = o.target_bitrate_kbps;
+                if o.max_bitrate_kbps > 0 {
+                    p.rate.max_kbps = o.max_bitrate_kbps;
+                }
+                if o.min_fps > 0 {
+                    p.rate.min_fps = o.min_fps;
+                }
+                if o.max_fps > 0 {
+                    p.rate.max_fps = o.max_fps;
+                }
+                if o.custom_fps > 0 {
+                    p.rate.target_fps = o.custom_fps as u32;
+                }
+                p.rate = p.rate.clamp();
+                video_service::VIDEO_QOS
+                    .lock()
+                    .unwrap()
+                    .user_video_profile(self.inner.id(), p);
+            }
         }
         if let Some(q) = o.supported_decoding.clone().take() {
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
