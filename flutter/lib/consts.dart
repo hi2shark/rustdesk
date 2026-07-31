@@ -422,6 +422,7 @@ const kOptionMinBitrate = 'min-bitrate';
 const kOptionTargetBitrate = 'target-bitrate';
 const kOptionMaxBitrate = 'max-bitrate';
 const kOptionMinFps = 'min-fps';
+const kOptionTargetFps = 'custom-fps';
 const kOptionMaxFps = 'max-fps';
 const kOptionMaxQueueMs = 'max-queue-ms';
 const kOptionEnableHqVideo = 'enable-hq-video';

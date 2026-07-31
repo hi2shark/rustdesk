@@ -687,3 +687,40 @@ impl Drop for Image {
 }
 
 unsafe impl Send for vpx_codec_ctx_t {}
+
+#[cfg(test)]
+mod hq_tests {
+    use super::*;
+    use crate::codec::EncoderCfg;
+    use hbb_common::video_profile::{RateControlMode, VideoRateConfig};
+
+    #[test]
+    fn vp9_applies_dynamic_bitrate_and_forces_next_keyframe() {
+        let mut encoder = VpxEncoder::new(
+            EncoderCfg::VPX(VpxEncoderConfig {
+                width: 64,
+                height: 64,
+                quality: 1.0,
+                codec: VpxVideoCodecId::VP9,
+                keyframe_interval: None,
+            }),
+            false,
+        )
+        .unwrap();
+        let rate = VideoRateConfig {
+            mode: RateControlMode::Auto,
+            min_kbps: 500,
+            target_kbps: 2_000,
+            max_kbps: 4_000,
+            target_fps: 60,
+            ..Default::default()
+        };
+        encoder.set_rate_control(&rate).unwrap();
+        assert_eq!(encoder.bitrate(), 2_000);
+        encoder.force_keyframe = false;
+        encoder.request_keyframe().unwrap();
+        assert!(encoder.force_keyframe);
+        assert!(encoder.capability().supports_dynamic_bitrate);
+        assert!(encoder.capability().supports_force_keyframe);
+    }
+}

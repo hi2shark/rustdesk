@@ -44,7 +44,7 @@ use hbb_common::{
     sleep, timeout,
     tokio::{
         net::TcpStream,
-        sync::mpsc,
+        sync::{mpsc, Notify},
         time::{self, Duration, Instant},
     },
     tokio_util::codec::{BytesCodec, Framed},
@@ -57,7 +57,7 @@ use serde_json::{json, value::Value};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::sync::atomic::Ordering;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     net::Ipv6Addr,
     num::NonZeroI64,
     path::PathBuf,
@@ -72,6 +72,74 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
+
+type VideoQueueItem = (Instant, Arc<Message>);
+
+#[derive(Default)]
+struct LatestVideoQueue {
+    items: Mutex<VecDeque<VideoQueueItem>>,
+    notify: Notify,
+}
+
+#[derive(Clone)]
+pub struct VideoSender {
+    queue: Arc<LatestVideoQueue>,
+}
+
+pub struct VideoReceiver {
+    queue: Arc<LatestVideoQueue>,
+}
+
+fn latest_video_channel() -> (VideoSender, VideoReceiver) {
+    let queue = Arc::new(LatestVideoQueue::default());
+    (
+        VideoSender {
+            queue: queue.clone(),
+        },
+        VideoReceiver { queue },
+    )
+}
+
+fn is_video_frame(msg: &Message) -> bool {
+    matches!(&msg.union, Some(message::Union::VideoFrame(_)))
+}
+
+impl VideoSender {
+    /// Enqueue a video/control message while keeping the newest video frames.
+    /// Control messages share this queue for ordering but are never evicted.
+    fn send(&self, item: VideoQueueItem, capacity: usize) -> usize {
+        let mut dropped = 0;
+        let mut items = self.queue.items.lock().unwrap();
+        if is_video_frame(&item.1) {
+            while items.iter().filter(|(_, msg)| is_video_frame(msg)).count() >= capacity {
+                let Some(pos) = items.iter().position(|(_, msg)| is_video_frame(msg)) else {
+                    break;
+                };
+                items.remove(pos);
+                dropped += 1;
+            }
+        }
+        items.push_back(item);
+        drop(items);
+        self.queue.notify.notify_one();
+        dropped
+    }
+}
+
+impl VideoReceiver {
+    async fn recv(&mut self) -> VideoQueueItem {
+        loop {
+            let item = {
+                let mut items = self.queue.items.lock().unwrap();
+                items.pop_front()
+            };
+            if let Some(item) = item {
+                return item;
+            }
+            self.queue.notify.notified().await;
+        }
+    }
+}
 
 lazy_static::lazy_static! {
     static ref LOGIN_FAILURES: [Arc::<Mutex<HashMap<String, (i32, i32, i32)>>>; 2] = Default::default();
@@ -133,8 +201,167 @@ fn build_custom_profile_from_option(
     if o.custom_fps > 0 {
         p.rate.target_fps = o.custom_fps as u32;
     }
+    if o.max_queue_ms > 0 {
+        p.rate.max_queue_ms = o.max_queue_ms;
+    }
+    if let Some(codec) = CodecPreference::from_proto(o.preferred_codec.value()) {
+        p.preferred_codec = codec;
+    }
+    if let Some(chroma) = ChromaPreference::from_proto(o.chroma_preference.value()) {
+        p.chroma = chroma;
+    }
+    p.allow_codec_fallback =
+        o.allow_codec_fallback.enum_value_or(BoolOption::NotSet) != BoolOption::No;
     p.rate = p.rate.clamp();
     p
+}
+
+enum HqProfileOption {
+    NoChange,
+    Disable,
+    Apply(hbb_common::video_profile::VideoProfile),
+}
+
+fn hq_profile_option(
+    o: &hbb_common::message_proto::OptionMessage,
+    width: u32,
+    height: u32,
+) -> HqProfileOption {
+    use hbb_common::video_profile::*;
+
+    let enabled = o.enable_hq_video.enum_value_or(BoolOption::NotSet);
+    if enabled == BoolOption::No {
+        return HqProfileOption::Disable;
+    }
+    let has_preview_fields = o.video_profile_type > 0
+        || o.rate_control_mode > 0
+        || o.min_bitrate_kbps > 0
+        || o.target_bitrate_kbps > 0
+        || o.max_bitrate_kbps > 0
+        || o.min_fps > 0
+        || o.max_fps > 0;
+    if enabled != BoolOption::Yes && !has_preview_fields {
+        return HqProfileOption::NoChange;
+    }
+
+    let mut profile = if let Some(profile_type) = VideoProfileType::from_proto(o.video_profile_type)
+    {
+        if profile_type == VideoProfileType::Custom {
+            build_custom_profile_from_option(o)
+        } else {
+            VideoProfile::for_type(profile_type, width, height)
+        }
+    } else if has_preview_fields {
+        build_custom_profile_from_option(o)
+    } else {
+        return HqProfileOption::NoChange;
+    };
+
+    if o.max_queue_ms > 0 {
+        profile.rate.max_queue_ms = o.max_queue_ms;
+    }
+    if let Some(codec) = CodecPreference::from_proto(o.preferred_codec.value()) {
+        if codec != CodecPreference::Auto || profile.profile_type == VideoProfileType::Custom {
+            profile.preferred_codec = codec;
+        }
+    }
+    if let Some(chroma) = ChromaPreference::from_proto(o.chroma_preference.value()) {
+        if chroma != ChromaPreference::Auto || profile.profile_type == VideoProfileType::Custom {
+            profile.chroma = chroma;
+        }
+    }
+    if o.allow_codec_fallback.enum_value_or(BoolOption::NotSet) != BoolOption::NotSet {
+        profile.allow_codec_fallback =
+            o.allow_codec_fallback.enum_value_or(BoolOption::Yes) == BoolOption::Yes;
+    }
+    profile.rate = profile.rate.clamp();
+    HqProfileOption::Apply(profile)
+}
+
+fn apply_hq_decoding_preferences(
+    decoding: &mut SupportedDecoding,
+    profile: &hbb_common::video_profile::VideoProfile,
+) {
+    use hbb_common::video_profile::{ChromaPreference, CodecPreference};
+
+    let preferred_codec = if profile.preferred_codec == CodecPreference::Auto
+        && profile.chroma == ChromaPreference::I444
+    {
+        CodecPreference::Vp9
+    } else {
+        profile.preferred_codec
+    };
+    decoding.prefer =
+        hbb_common::protobuf::EnumOrUnknown::from_i32(preferred_codec.to_proto());
+    match profile.chroma {
+        ChromaPreference::Auto => {}
+        ChromaPreference::I420 => decoding.prefer_chroma = Chroma::I420.into(),
+        ChromaPreference::I444 => decoding.prefer_chroma = Chroma::I444.into(),
+    }
+}
+
+fn hq_profile_capability_error(
+    profile: &hbb_common::video_profile::VideoProfile,
+) -> Option<String> {
+    use hbb_common::video_profile::{ChromaPreference, CodecPreference};
+
+    let usable = scrap::codec::Encoder::usable_encoding().unwrap_or_default();
+    let codec_supported = match profile.preferred_codec {
+        CodecPreference::Auto | CodecPreference::Vp9 => true,
+        CodecPreference::Vp8 => usable.vp8,
+        CodecPreference::Av1 => usable.av1,
+        CodecPreference::H264 => usable.h264,
+        CodecPreference::H265 => usable.h265,
+    };
+    if !codec_supported {
+        return Some(format!(
+            "HQ profile rejected: requested codec {} is unavailable and fallback is disabled",
+            profile.preferred_codec.as_str()
+        ));
+    }
+    if profile.chroma == ChromaPreference::I444 {
+        let supports_i444 = match profile.preferred_codec {
+            CodecPreference::Auto | CodecPreference::Vp9 => usable.i444.vp9,
+            CodecPreference::Av1 => usable.i444.av1,
+            _ => false,
+        };
+        if !supports_i444 {
+            return Some(
+                "HQ profile rejected: requested I444 is unavailable and fallback is disabled"
+                    .to_owned(),
+            );
+        }
+    }
+    None
+}
+
+fn hq_profile_fallback_reason(profile: &hbb_common::video_profile::VideoProfile) -> Option<String> {
+    use hbb_common::video_profile::{ChromaPreference, CodecPreference};
+
+    let actual = scrap::codec::Encoder::negotiated_codec()
+        .to_string()
+        .to_ascii_lowercase();
+    if profile.preferred_codec != CodecPreference::Auto
+        && actual != profile.preferred_codec.as_str()
+    {
+        return Some(format!(
+            "requested {}, using {}",
+            profile.preferred_codec.as_str(),
+            actual
+        ));
+    }
+    if profile.chroma == ChromaPreference::I444 {
+        let usable = scrap::codec::Encoder::usable_encoding().unwrap_or_default();
+        let supports_i444 = match actual.as_str() {
+            "vp9" => usable.i444.vp9,
+            "av1" => usable.i444.av1,
+            _ => false,
+        };
+        if !supports_i444 {
+            return Some("requested I444, using I420".to_owned());
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -212,7 +439,7 @@ pub fn plugin_block_input(peer: &str, block: bool) -> bool {
 pub struct ConnInner {
     id: i32,
     tx: Option<Sender>,
-    tx_video: Option<Sender>,
+    tx_video: Option<VideoSender>,
 }
 
 struct InputMouse {
@@ -425,7 +652,7 @@ pub struct Connection {
 }
 
 impl ConnInner {
-    pub fn new(id: i32, tx: Option<Sender>, tx_video: Option<Sender>) -> Self {
+    pub fn new(id: i32, tx: Option<Sender>, tx_video: Option<VideoSender>) -> Self {
         Self { id, tx, tx_video }
     }
 }
@@ -447,14 +674,25 @@ impl Subscriber for ConnInner {
             },
             _ => false,
         };
-        let tx = if tx_by_video {
-            self.tx_video.as_mut()
+        if tx_by_video {
+            if let Some(tx) = self.tx_video.as_ref() {
+                let capacity = video_service::VIDEO_QOS
+                    .lock()
+                    .unwrap()
+                    .video_queue_capacity();
+                let dropped = tx.send((Instant::now(), msg), capacity);
+                if dropped > 0 {
+                    let mut qos = video_service::VIDEO_QOS.lock().unwrap();
+                    for _ in 0..dropped {
+                        qos.on_video_frame_dropped(self.id);
+                    }
+                }
+            }
         } else {
-            self.tx.as_mut()
-        };
-        tx.map(|tx| {
-            allow_err!(tx.send((Instant::now(), msg)));
-        });
+            self.tx.as_ref().map(|tx| {
+                allow_err!(tx.send((Instant::now(), msg)));
+            });
+        }
     }
 }
 
@@ -495,7 +733,7 @@ impl Connection {
         let tx_from_cm = tx_from_cm_holder.clone();
         let (tx_to_cm, rx_to_cm) = mpsc::unbounded_channel::<ipc::Data>();
         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
-        let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
+        let (tx_video, mut rx_video) = latest_video_channel();
         let (tx_input, _rx_input) = std_mpsc::channel();
         let (tx_from_authed, mut rx_from_authed) = mpsc::unbounded_channel::<ipc::Data>();
         let mut hbbs_rx = crate::hbbs_http::sync::signal_receiver();
@@ -996,7 +1234,7 @@ impl Connection {
                         break;
                     }
                 }
-                Some((instant, value)) = rx_video.recv() => {
+                (instant, value) = rx_video.recv() => {
                     if !conn.video_ack_required {
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
                             video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
@@ -1111,8 +1349,12 @@ impl Connection {
                                 last_delay: conn.network_delay,
                                 target_bitrate: qos.bitrate(),
                                 queue_delay_ms: qos.last_queue_delay_ms(),
-                                fallback_reason: qos.encoder_fallback_reason().to_owned(),
-                                qos_state: qos.hq_state().as_str().to_owned(),
+                                fallback_reason: qos.fallback_reason(id).to_owned(),
+                                qos_state: if qos.hq_enabled() {
+                                    qos.hq_state().as_str().to_owned()
+                                } else {
+                                    String::new()
+                                },
                                 hardware: qos.is_encoder_hardware(),
                                 ..Default::default()
                             });
@@ -4402,40 +4644,58 @@ impl Connection {
                 .unwrap()
                 .user_custom_fps(self.inner.id(), o.custom_fps as _);
         }
-        // HQ video profile / advanced rate control (new fields, 0 = unset)
-        if o.video_profile_type > 0
-            || o.target_bitrate_kbps > 0
-            || o.rate_control_mode > 0
-        {
-            use hbb_common::video_profile::*;
-            let (width, height) = display_service::try_get_displays()
-                .ok()
-                .and_then(|ds| {
-                    ds.get(self.display_idx)
-                        .map(|d| (d.width() as u32, d.height() as u32))
-                })
-                .unwrap_or((1920, 1080));
-            let profile = if let Some(pt) = VideoProfileType::from_proto(o.video_profile_type) {
-                Some(if pt == VideoProfileType::Custom {
-                    build_custom_profile_from_option(o)
-                } else {
-                    VideoProfile::for_type(pt, width, height)
-                })
-            } else if o.target_bitrate_kbps > 0 {
-                // Partial HQ fields without profile type → treat as custom
-                Some(build_custom_profile_from_option(o))
-            } else {
-                None
-            };
-            if let Some(profile) = profile {
+        // Apply the peer's original capabilities first. HQ preferences may narrow
+        // the negotiated codec, but must never make an unsupported codec usable.
+        let base_decoding = o.supported_decoding.clone().take();
+        if let Some(q) = base_decoding.clone() {
+            scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
+        }
+        let (width, height) = display_service::try_get_displays()
+            .ok()
+            .and_then(|ds| {
+                ds.get(self.display_idx)
+                    .map(|d| (d.width() as u32, d.height() as u32))
+            })
+            .unwrap_or((1920, 1080));
+        match hq_profile_option(o, width, height) {
+            HqProfileOption::NoChange => {}
+            HqProfileOption::Disable => {
                 video_service::VIDEO_QOS
                     .lock()
                     .unwrap()
-                    .user_video_profile(self.inner.id(), profile);
+                    .disable_user_video_profile(self.inner.id());
             }
-        }
-        if let Some(q) = o.supported_decoding.clone().take() {
-            scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
+            HqProfileOption::Apply(profile) => {
+                let rejection = if profile.allow_codec_fallback {
+                    None
+                } else {
+                    hq_profile_capability_error(&profile)
+                };
+                if let Some(reason) = rejection {
+                    log::warn!("{reason}");
+                    video_service::VIDEO_QOS
+                        .lock()
+                        .unwrap()
+                        .reject_user_video_profile(self.inner.id(), reason);
+                } else {
+                    if let Some(mut decoding) = base_decoding {
+                        apply_hq_decoding_preferences(&mut decoding, &profile);
+                        scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(
+                            self.inner.id(),
+                            decoding,
+                        ));
+                    }
+                    let fallback_reason = hq_profile_fallback_reason(&profile);
+                    let mut qos = video_service::VIDEO_QOS.lock().unwrap();
+                    qos.user_video_profile(self.inner.id(), profile);
+                    qos.clear_encoder_fallback_reason();
+                    if let Some(reason) = fallback_reason {
+                        qos.set_user_fallback_reason(self.inner.id(), reason);
+                    } else {
+                        qos.clear_user_fallback_reason(self.inner.id());
+                    }
+                }
+            }
         }
         if let Ok(q) = o.lock_after_session_end.enum_value() {
             if q != BoolOption::NotSet {
@@ -6328,5 +6588,136 @@ mod test {
         assert!(Ipv6Addr::from_str("::1").is_ok());
         assert!(Ipv6Addr::from_str("127.0.0.1").is_err());
         assert!(Ipv6Addr::from_str("0").is_err());
+    }
+
+    #[test]
+    fn hq_option_supports_preview_enable_disable_and_legacy() {
+        let mut preview = OptionMessage::new();
+        preview.video_profile_type =
+            hbb_common::video_profile::VideoProfileType::OfficeClear.to_proto();
+        assert!(matches!(
+            hq_profile_option(&preview, 1920, 1080),
+            HqProfileOption::Apply(_)
+        ));
+        let mut partial_preview = OptionMessage::new();
+        partial_preview.min_fps = 12;
+        assert!(matches!(
+            hq_profile_option(&partial_preview, 1920, 1080),
+            HqProfileOption::Apply(_)
+        ));
+
+        let legacy = OptionMessage::new();
+        assert!(matches!(
+            hq_profile_option(&legacy, 1920, 1080),
+            HqProfileOption::NoChange
+        ));
+
+        let mut disabled = preview;
+        disabled.enable_hq_video = BoolOption::No.into();
+        assert!(matches!(
+            hq_profile_option(&disabled, 1920, 1080),
+            HqProfileOption::Disable
+        ));
+    }
+
+    #[test]
+    fn custom_hq_option_restores_all_parameters() {
+        use hbb_common::video_profile::{
+            ChromaPreference, CodecPreference, RateControlMode, VideoProfileType,
+        };
+
+        let mut option = OptionMessage::new();
+        option.enable_hq_video = BoolOption::Yes.into();
+        option.video_profile_type = VideoProfileType::Custom.to_proto();
+        option.rate_control_mode = RateControlMode::Auto.to_proto();
+        option.min_bitrate_kbps = 4_000;
+        option.target_bitrate_kbps = 8_000;
+        option.max_bitrate_kbps = 12_000;
+        option.min_fps = 24;
+        option.custom_fps = 48;
+        option.max_fps = 60;
+        option.max_queue_ms = 90;
+        option.allow_codec_fallback = BoolOption::No.into();
+        option.preferred_codec =
+            hbb_common::protobuf::EnumOrUnknown::from_i32(CodecPreference::H265.to_proto());
+        option.chroma_preference =
+            hbb_common::protobuf::EnumOrUnknown::from_i32(ChromaPreference::I420.to_proto());
+
+        let HqProfileOption::Apply(profile) = hq_profile_option(&option, 1920, 1080) else {
+            panic!("expected HQ profile");
+        };
+        assert_eq!(profile.rate.min_kbps, 4_000);
+        assert_eq!(profile.rate.target_kbps, 8_000);
+        assert_eq!(profile.rate.max_kbps, 12_000);
+        assert_eq!(profile.rate.min_fps, 24);
+        assert_eq!(profile.rate.target_fps, 48);
+        assert_eq!(profile.rate.max_fps, 60);
+        assert_eq!(profile.rate.max_queue_ms, 90);
+        assert_eq!(profile.preferred_codec, CodecPreference::H265);
+        assert_eq!(profile.chroma, ChromaPreference::I420);
+        assert!(!profile.allow_codec_fallback);
+    }
+
+    #[test]
+    fn auto_codec_with_i444_selects_an_i444_capable_codec() {
+        use hbb_common::{
+            message_proto::{
+                supported_decoding::PreferCodec,
+                SupportedDecoding,
+            },
+            video_profile::{ChromaPreference, VideoProfile},
+        };
+
+        let mut profile = VideoProfile::default();
+        profile.chroma = ChromaPreference::I444;
+        let mut decoding = SupportedDecoding::new();
+        apply_hq_decoding_preferences(&mut decoding, &profile);
+        assert_eq!(decoding.prefer.enum_value_or_default(), PreferCodec::VP9);
+        assert_eq!(decoding.prefer_chroma.enum_value_or_default(), Chroma::I444);
+    }
+
+    #[test]
+    fn latest_video_queue_drops_oldest_frame_and_keeps_control_message() {
+        fn video(display: i32) -> Arc<Message> {
+            let mut frame = VideoFrame::new();
+            frame.display = display;
+            let mut message = Message::new();
+            message.set_video_frame(frame);
+            Arc::new(message)
+        }
+        fn switch_display() -> Arc<Message> {
+            let mut misc = Misc::new();
+            misc.set_switch_display(SwitchDisplay::new());
+            let mut message = Message::new();
+            message.set_misc(misc);
+            Arc::new(message)
+        }
+
+        let (sender, _receiver) = latest_video_channel();
+        assert_eq!(sender.send((Instant::now(), video(1)), 2), 0);
+        assert_eq!(
+            sender.send((Instant::now(), switch_display()), 2),
+            0
+        );
+        assert_eq!(sender.send((Instant::now(), video(2)), 2), 0);
+        assert_eq!(sender.send((Instant::now(), video(3)), 2), 1);
+
+        let items = sender.queue.items.lock().unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().any(|(_, message)| {
+            matches!(
+                &message.union,
+                Some(message::Union::Misc(misc))
+                    if matches!(&misc.union, Some(misc::Union::SwitchDisplay(_)))
+            )
+        }));
+        let displays: Vec<i32> = items
+            .iter()
+            .filter_map(|(_, message)| match &message.union {
+                Some(message::Union::VideoFrame(frame)) => Some(frame.display),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(displays, vec![2, 3]);
     }
 }

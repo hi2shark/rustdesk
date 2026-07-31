@@ -60,7 +60,6 @@ pub struct HwRamEncoder {
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
     config: HwRamEncoderConfig,
-    force_keyframe: bool,
 }
 
 impl EncoderApi for HwRamEncoder {
@@ -114,7 +113,6 @@ impl EncoderApi for HwRamEncoder {
                         pixfmt: ctx.pixfmt,
                         bitrate,
                         config,
-                        force_keyframe: true,
                     }),
                     Err(_) => Err(anyhow!(format!("Failed to create encoder"))),
                 }
@@ -229,7 +227,6 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn request_keyframe(&mut self) -> ResultType<()> {
-        self.force_keyframe = true;
         // Best-effort only: the hwcodec crate exposes set_bitrate but no force-IDR API.
         // supports_force_keyframe remains false; QoS relies on periodic GOP refresh.
         let _ = self.encoder.set_bitrate(self.bitrate as _);

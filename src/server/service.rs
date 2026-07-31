@@ -242,6 +242,10 @@ impl<T: Subscriber + From<ConnInner>> ServiceTmpl<T> {
         conn_ids
     }
 
+    pub fn subscriber_ids(&self) -> HashSet<i32> {
+        self.0.read().unwrap().subscribes.keys().copied().collect()
+    }
+
     pub fn send_without(&self, msg: Message, sub: i32) {
         let mut lock = self.0.write().unwrap();
         let msg = Arc::new(msg);

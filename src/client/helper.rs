@@ -17,6 +17,7 @@ pub struct QualityStatus {
     pub fallback_reason: Option<String>,
     pub qos_state: Option<String>,
     pub hardware: Option<bool>,
+    pub hq_diagnostics_updated: bool,
 }
 
 #[inline]

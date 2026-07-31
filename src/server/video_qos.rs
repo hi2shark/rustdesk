@@ -1,11 +1,11 @@
 use super::*;
-use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
 use hbb_common::video_profile::{
     QosState, RateControlMode, VideoProfile, VideoProfileType, VideoRateConfig, BASE_1080P_KBPS,
+};
+use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
+use std::{
+    collections::{HashSet, VecDeque},
+    time::{Duration, Instant},
 };
 
 /*
@@ -106,8 +106,9 @@ struct UserData {
     delay: UserDelay,
     record: bool,
     /// When set, enables HQ QoS path for this user.
-    rate_config: Option<VideoRateConfig>,
-    profile_type: Option<VideoProfileType>,
+    video_profile: Option<VideoProfile>,
+    profile_generation: u64,
+    fallback_reason: String,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -122,6 +123,7 @@ struct PendingFrame {
     seq: u64,
     enqueue_instant: Instant,
     bytes: u32,
+    waiting_connections: HashSet<i32>,
 }
 
 // Main QoS controller structure
@@ -143,6 +145,11 @@ pub struct VideoQoS {
     hq_freeze_until: Option<Instant>,
     hq_rate: Option<VideoRateConfig>,
     hq_profile: Option<VideoProfileType>,
+    hq_profile_config: Option<VideoProfile>,
+    hq_profile_owner: Option<i32>,
+    hq_active_generation: u64,
+    profile_generation_counter: u64,
+    hq_last_rate_adjust: Instant,
     frame_seq: u64,
     pending_frames: VecDeque<PendingFrame>,
     last_queue_delay_ms: u32,
@@ -171,6 +178,11 @@ impl Default for VideoQoS {
             hq_freeze_until: None,
             hq_rate: None,
             hq_profile: None,
+            hq_profile_config: None,
+            hq_profile_owner: None,
+            hq_active_generation: 0,
+            profile_generation_counter: 0,
+            hq_last_rate_adjust: Instant::now() - Duration::from_millis(200),
             frame_seq: 0,
             pending_frames: VecDeque::new(),
             last_queue_delay_ms: 0,
@@ -270,8 +282,52 @@ impl VideoQoS {
         self.encoder_fallback_reason = reason;
     }
 
+    pub fn clear_encoder_fallback_reason(&mut self) {
+        self.encoder_fallback_reason.clear();
+    }
+
     pub fn encoder_fallback_reason(&self) -> &str {
         &self.encoder_fallback_reason
+    }
+
+    pub fn set_user_fallback_reason(&mut self, id: i32, reason: String) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.fallback_reason = reason;
+        }
+    }
+
+    pub fn clear_user_fallback_reason(&mut self, id: i32) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.fallback_reason.clear();
+        }
+    }
+
+    pub fn reject_user_video_profile(&mut self, id: i32, reason: String) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.fallback_reason = reason;
+        }
+        if self.hq_profile_owner == Some(id) {
+            // Preserve the already-running profile, but reset its controller so
+            // the rejected switch cannot leave stale congestion/keyframe state.
+            self.hq_active_generation = 0;
+            self.refresh_hq_from_users();
+        }
+    }
+
+    pub fn fallback_reason(&self, id: i32) -> &str {
+        self.users
+            .get(&id)
+            .map(|user| user.fallback_reason.as_str())
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or(&self.encoder_fallback_reason)
+    }
+
+    pub fn hq_profile_config(&self) -> Option<&VideoProfile> {
+        self.hq_profile_config.as_ref()
+    }
+
+    pub fn hq_profile_owner(&self) -> Option<i32> {
+        self.hq_profile_owner
     }
 
     pub fn set_encoder_hardware(&mut self, hw: bool) {
@@ -294,48 +350,90 @@ impl VideoQoS {
             .as_ref()
             .map(|r| r.max_queue_ms as u64)
             .unwrap_or(150);
-        ((fps * max_queue_ms) / 1000).clamp(30, 120) as usize
+        ((fps * max_queue_ms + 999) / 1000).clamp(2, 120) as usize
     }
 
-    pub fn on_frame_enqueue(&mut self, bytes: u32) -> u64 {
+    pub fn video_queue_capacity(&self) -> usize {
+        self.pending_frame_limit()
+    }
+
+    pub fn on_frame_enqueue(&mut self, bytes: u32, waiting_connections: HashSet<i32>) -> u64 {
         self.frame_seq = self.frame_seq.wrapping_add(1);
         let seq = self.frame_seq;
+        if waiting_connections.is_empty() {
+            return seq;
+        }
         self.pending_frames.push_back(PendingFrame {
             seq,
             enqueue_instant: Instant::now(),
             bytes,
+            waiting_connections,
         });
-        let limit = self.pending_frame_limit();
-        while self.pending_frames.len() > limit {
-            self.pending_frames.pop_front();
-        }
         seq
     }
 
-    pub fn on_frame_delivered(&mut self, seq: u64) {
+    pub fn on_frame_delivered(&mut self, seq: u64, conn_id: i32) {
         let baseline_rtt = self
             .users
-            .values()
-            .filter_map(|u| u.delay.rtt_calculator.get_rtt())
-            .min()
+            .get(&conn_id)
+            .and_then(|u| u.delay.rtt_calculator.get_rtt())
             .unwrap_or(0);
         if let Some(pos) = self.pending_frames.iter().position(|f| f.seq == seq) {
-            if let Some(frame) = self.pending_frames.remove(pos) {
-                let elapsed = frame.enqueue_instant.elapsed().as_millis() as u32;
-                let queue_delay = elapsed.saturating_sub(baseline_rtt);
-                self.last_queue_delay_ms = queue_delay;
-                if self.hq_enabled {
-                    self.hq_on_queue_delay(queue_delay);
+            let complete = self
+                .pending_frames
+                .get_mut(pos)
+                .map(|frame| {
+                    frame.waiting_connections.remove(&conn_id);
+                    frame.waiting_connections.is_empty()
+                })
+                .unwrap_or(false);
+            if complete {
+                let frame = self.pending_frames.remove(pos);
+                if let Some(frame) = frame {
+                    let elapsed = frame.enqueue_instant.elapsed().as_millis() as u32;
+                    let queue_delay = elapsed.saturating_sub(baseline_rtt);
+                    self.last_queue_delay_ms = queue_delay;
+                    if self.hq_enabled {
+                        self.hq_on_queue_delay(queue_delay);
+                    }
                 }
             }
         }
         // Unmatched ack: ignore (do not borrow another frame's delay).
     }
 
-    pub fn on_video_frame_fetched(&mut self) {
-        if let Some(frame) = self.pending_frames.front() {
-            let seq = frame.seq;
-            self.on_frame_delivered(seq);
+    pub fn on_video_frame_fetched(&mut self, conn_id: i32) {
+        if let Some(seq) = self
+            .pending_frames
+            .iter()
+            .find(|frame| frame.waiting_connections.contains(&conn_id))
+            .map(|frame| frame.seq)
+        {
+            self.on_frame_delivered(seq, conn_id);
+        }
+    }
+
+    /// Remove the oldest frame expected by a connection without creating a
+    /// latency sample. This is used when that connection's bounded queue evicts
+    /// a video frame in favor of a newer one.
+    pub fn on_video_frame_dropped(&mut self, conn_id: i32) {
+        if let Some(pos) = self
+            .pending_frames
+            .iter()
+            .position(|frame| frame.waiting_connections.contains(&conn_id))
+        {
+            let complete = self
+                .pending_frames
+                .get_mut(pos)
+                .map(|frame| {
+                    frame.waiting_connections.remove(&conn_id);
+                    frame.waiting_connections.is_empty()
+                })
+                .unwrap_or(false);
+            if complete {
+                self.pending_frames.remove(pos);
+            }
+            self.need_keyframe = true;
         }
     }
 
@@ -377,6 +475,11 @@ impl VideoQoS {
 
     // Clean up user session
     pub fn on_connection_close(&mut self, id: i32) {
+        for frame in &mut self.pending_frames {
+            frame.waiting_connections.remove(&id);
+        }
+        self.pending_frames
+            .retain(|frame| !frame.waiting_connections.is_empty());
         self.users.remove(&id);
         if self.users.is_empty() {
             *self = Default::default();
@@ -410,10 +513,15 @@ impl VideoQoS {
     /// `hq_enabled`), `latest_quality()` can still fall back to a sensible ratio
     /// derived from the last HQ target bitrate.
     pub fn user_video_profile(&mut self, id: i32, profile: VideoProfile) {
+        let profile_type = profile.profile_type;
         let rate = profile.rate.clone().clamp();
+        self.profile_generation_counter = self.profile_generation_counter.wrapping_add(1).max(1);
         if let Some(user) = self.users.get_mut(&id) {
-            user.rate_config = Some(rate.clone());
-            user.profile_type = Some(profile.profile_type);
+            let mut profile = profile;
+            profile.rate = rate.clone();
+            user.video_profile = Some(profile);
+            user.profile_generation = self.profile_generation_counter;
+            user.fallback_reason.clear();
             user.custom_fps = Some(rate.target_fps);
             let ratio = rate.to_legacy_ratio();
             user.quality = Some((hbb_common::get_time(), Quality::Custom(ratio)));
@@ -422,46 +530,84 @@ impl VideoQoS {
         log::info!(
             "HQ video profile applied for user {}: type={:?}, mode={:?}, target={}kbps, fps={}",
             id,
-            profile.profile_type,
+            profile_type,
             rate.mode,
             rate.target_kbps,
             rate.target_fps
         );
     }
 
+    pub fn disable_user_video_profile(&mut self, id: i32) {
+        self.profile_generation_counter = self.profile_generation_counter.wrapping_add(1).max(1);
+        if let Some(user) = self.users.get_mut(&id) {
+            user.video_profile = None;
+            user.profile_generation = self.profile_generation_counter;
+            user.fallback_reason.clear();
+        }
+        self.refresh_hq_from_users();
+        if !self.hq_enabled {
+            self.encoder_fallback_reason.clear();
+        }
+    }
+
     /// Recompute session-level HQ state from the newest per-user profile.
-    /// When no user still has a rate_config, HQ is disabled and the legacy
+    /// When no user still has a video profile, HQ is disabled and the legacy
     /// delay/ratio path takes over again (using each user's stored `quality`).
     fn refresh_hq_from_users(&mut self) {
         let latest = self
             .users
-            .values()
-            .filter_map(|u| {
-                u.rate_config.as_ref().map(|r| {
-                    (
-                        u.quality.map(|q| q.0).unwrap_or(0),
-                        r.clone(),
-                        u.profile_type.unwrap_or(VideoProfileType::Custom),
-                    )
-                })
+            .iter()
+            .filter_map(|(id, user)| {
+                user.video_profile
+                    .as_ref()
+                    .map(|profile| (user.profile_generation, *id, profile.clone()))
             })
-            .max_by_key(|(t, _, _)| *t);
-        if let Some((_, rate, profile)) = latest {
+            .max_by_key(|(generation, _, _)| *generation);
+        if let Some((generation, owner, profile)) = latest {
+            let rate = profile.rate.clone().clamp();
+            let active_changed =
+                self.hq_active_generation != generation || self.hq_profile_owner != Some(owner);
             self.hq_enabled = true;
             self.hq_rate = Some(rate.clone());
-            self.hq_profile = Some(profile);
+            self.hq_profile = Some(profile.profile_type);
+            self.hq_profile_config = Some(profile);
+            self.hq_profile_owner = Some(owner);
             self.hq_target_kbps = rate.target_kbps;
-            if self.hq_current_kbps == 0 {
+            if active_changed {
                 self.hq_current_kbps = rate.target_kbps;
+                self.hq_state = QosState::Stable;
+                self.hq_good_samples = 0;
+                self.hq_freeze_until = None;
+                self.need_keyframe = false;
+                self.drop_old_frames = false;
+                self.pending_frames.clear();
+                self.last_queue_delay_ms = 0;
+                self.hq_last_rate_adjust = Instant::now() - Duration::from_millis(200);
             } else {
                 self.hq_current_kbps = self.hq_current_kbps.clamp(rate.min_kbps, rate.max_kbps);
             }
+            self.hq_active_generation = generation;
             self.fps = rate.target_fps.clamp(MIN_FPS, MAX_FPS);
             self.ratio = rate.to_legacy_ratio();
         } else {
+            let was_hq_enabled = self.hq_enabled;
             self.hq_enabled = false;
             self.hq_rate = None;
             self.hq_profile = None;
+            self.hq_profile_config = None;
+            self.hq_profile_owner = None;
+            self.hq_active_generation = 0;
+            self.hq_current_kbps = 0;
+            self.hq_target_kbps = 0;
+            if was_hq_enabled {
+                self.hq_state = QosState::Stable;
+                self.hq_good_samples = 0;
+                self.hq_freeze_until = None;
+                self.need_keyframe = false;
+                self.drop_old_frames = false;
+                self.pending_frames.clear();
+                self.last_queue_delay_ms = 0;
+            }
         }
     }
 
@@ -510,6 +656,13 @@ impl VideoQoS {
             );
             self.hq_state = new_state;
         }
+
+        // Queue acknowledgements can arrive once per frame. Rate decisions are
+        // time-based so high FPS sessions do not collapse or recover faster.
+        if self.hq_last_rate_adjust.elapsed() < Duration::from_millis(200) {
+            return;
+        }
+        self.hq_last_rate_adjust = Instant::now();
 
         match self.hq_state {
             QosState::ProbeUp => {
@@ -1030,8 +1183,8 @@ mod hq_tests {
         qos.user_video_profile(1, VideoProfile::tcp_stable(ResolutionTier::P1080));
         let before = qos.hq_state();
         let kbps_before = qos.current_kbps();
-        qos.on_frame_enqueue(1000);
-        qos.on_frame_enqueue(1000);
+        qos.on_frame_enqueue(1000, HashSet::from([1]));
+        qos.on_frame_enqueue(1000, HashSet::from([1]));
         qos.clear_pending_frames();
         assert_eq!(qos.pending_video_bytes(), 0);
         assert_eq!(qos.hq_state(), before);
@@ -1041,9 +1194,55 @@ mod hq_tests {
     #[test]
     fn unmatched_frame_ack_does_not_pop_front() {
         let mut qos = VideoQoS::default();
-        let seq = qos.on_frame_enqueue(500);
-        qos.on_frame_delivered(seq.wrapping_add(999));
+        let seq = qos.on_frame_enqueue(500, HashSet::from([1]));
+        qos.on_frame_delivered(seq.wrapping_add(999), 1);
         assert_eq!(qos.pending_video_bytes(), 500);
+    }
+
+    #[test]
+    fn queue_capacity_uses_real_profile_duration() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        let mut profile = VideoProfile::office_clear(ResolutionTier::P1080);
+        profile.rate.target_fps = 30;
+        profile.rate.max_queue_ms = 150;
+        qos.user_video_profile(1, profile);
+        assert_eq!(qos.video_queue_capacity(), 5);
+
+        let mut short = qos.hq_profile_config().cloned().unwrap();
+        short.rate.target_fps = 1;
+        short.rate.max_queue_ms = 1;
+        qos.user_video_profile(1, short);
+        assert_eq!(qos.video_queue_capacity(), 2);
+    }
+
+    #[test]
+    fn slowest_connection_completes_frame_and_drives_delay() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.on_connection_open(2);
+        qos.user_video_profile(1, VideoProfile::office_clear(ResolutionTier::P1080));
+        qos.on_frame_enqueue(500, HashSet::from([1, 2]));
+
+        qos.on_video_frame_fetched(1);
+        assert_eq!(qos.pending_video_bytes(), 500);
+        qos.pending_frames.front_mut().unwrap().enqueue_instant -= Duration::from_millis(200);
+        qos.on_video_frame_fetched(2);
+        assert_eq!(qos.pending_video_bytes(), 0);
+        assert!(qos.last_queue_delay_ms() >= 190);
+    }
+
+    #[test]
+    fn disconnect_clears_waiting_connection_without_latency_sample() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.on_connection_open(2);
+        qos.on_frame_enqueue(500, HashSet::from([1, 2]));
+        qos.on_connection_close(2);
+        assert_eq!(qos.pending_video_bytes(), 500);
+        assert_eq!(qos.last_queue_delay_ms(), 0);
+        qos.on_video_frame_fetched(1);
+        assert_eq!(qos.pending_video_bytes(), 0);
     }
 
     #[test]
@@ -1063,6 +1262,7 @@ mod hq_tests {
         // Clear recovery freeze so ProbeUp can raise FPS again.
         qos.hq_freeze_until = None;
         for _ in 0..12 {
+            qos.hq_last_rate_adjust = Instant::now() - Duration::from_millis(200);
             qos.hq_on_queue_delay(30);
         }
         assert!(qos.fps() > fps_after_drop);
@@ -1075,5 +1275,60 @@ mod hq_tests {
         let p1080 = VideoProfile::for_type(VideoProfileType::OfficeClear, 1920, 1080);
         assert_eq!(p1080.rate.target_kbps, 16_000);
         assert!(p4k.rate.target_kbps > p1080.rate.target_kbps);
+    }
+
+    #[test]
+    fn newest_profile_wins_and_disable_restores_remaining_user() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.on_connection_open(2);
+        let office = VideoProfile::office_clear(ResolutionTier::P1080);
+        let motion = VideoProfile::motion_smooth(ResolutionTier::P1080);
+        qos.user_video_profile(1, office.clone());
+        qos.user_video_profile(2, motion.clone());
+        assert_eq!(qos.hq_profile_owner(), Some(2));
+        assert_eq!(qos.current_kbps(), motion.rate.target_kbps);
+
+        qos.disable_user_video_profile(2);
+        assert_eq!(qos.hq_profile_owner(), Some(1));
+        assert_eq!(qos.current_kbps(), office.rate.target_kbps);
+
+        qos.last_queue_delay_ms = 123;
+        qos.disable_user_video_profile(1);
+        assert!(!qos.hq_enabled());
+        assert_eq!(qos.last_queue_delay_ms(), 0);
+        assert_eq!(qos.hq_state(), QosState::Stable);
+        assert!(!qos.take_need_keyframe());
+    }
+
+    #[test]
+    fn rejected_switch_keeps_current_profile_and_exposes_reason() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        let office = VideoProfile::office_clear(ResolutionTier::P1080);
+        qos.user_video_profile(1, office.clone());
+        qos.hq_on_queue_delay(200);
+        assert_ne!(qos.hq_state(), QosState::Stable);
+
+        qos.reject_user_video_profile(1, "codec unavailable".to_owned());
+        assert!(qos.hq_enabled());
+        assert_eq!(qos.hq_profile_config(), Some(&office));
+        assert_eq!(qos.hq_state(), QosState::Stable);
+        assert_eq!(qos.fallback_reason(1), "codec unavailable");
+    }
+
+    #[test]
+    fn rate_adjustment_is_throttled_by_time() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        let profile = VideoProfile::office_clear(ResolutionTier::P1080);
+        qos.user_video_profile(1, profile.clone());
+        qos.hq_on_queue_delay(200);
+        let after_first = qos.current_kbps();
+        for _ in 0..120 {
+            qos.hq_on_queue_delay(200);
+        }
+        assert_eq!(qos.current_kbps(), after_first);
+        assert!(after_first > profile.rate.min_kbps);
     }
 }

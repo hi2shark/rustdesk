@@ -595,32 +595,37 @@ class QualityMonitor extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _row("Speed", qualityMonitorModel.data.speed ?? '-'),
-                      _row("FPS", qualityMonitorModel.data.fps ?? '-'),
+                      _row(translate("Speed"),
+                          qualityMonitorModel.data.speed ?? '-'),
+                      _row(translate("FPS"),
+                          qualityMonitorModel.data.fps ?? '-'),
                       // let delay be 0 if fps is 0
                       _row(
-                          "Delay",
+                          translate("Delay"),
                           "${qualityMonitorModel.data.delay == null ? '-' : (qualityMonitorModel.data.fps ?? "").replaceAll(' ', '').replaceAll('0', '').isEmpty ? 0 : qualityMonitorModel.data.delay}ms",
                           rightColor: Colors.green),
-                      _row("Target Bitrate",
+                      _row(translate("Target Bitrate"),
                           "${qualityMonitorModel.data.targetBitrate ?? '-'}kb"),
                       _row(
-                          "Codec", qualityMonitorModel.data.codecFormat ?? '-'),
-                      _row("Chroma", qualityMonitorModel.data.chroma ?? '-'),
+                          translate("Codec"),
+                          qualityMonitorModel.data.codecFormat ?? '-'),
+                      _row(translate("Chroma"),
+                          qualityMonitorModel.data.chroma ?? '-'),
                       if (qualityMonitorModel.data.queueDelay != null)
-                        _row("Queue",
+                        _row(translate("Queue"),
                             "${qualityMonitorModel.data.queueDelay}ms"),
                       if (qualityMonitorModel.data.qosState != null)
-                        _row("QoS", qualityMonitorModel.data.qosState ?? '-'),
+                        _row(translate("QoS"),
+                            qualityMonitorModel.data.qosState ?? '-'),
                       if (qualityMonitorModel.data.hardware != null)
                         _row(
-                            "HW",
+                            translate("Hardware"),
                             qualityMonitorModel.data.hardware == 'true'
-                                ? 'Yes'
-                                : 'No'),
+                                ? translate('Yes')
+                                : translate('No')),
                       if ((qualityMonitorModel.data.fallbackReason ?? '')
                           .isNotEmpty)
-                        _row("Fallback",
+                        _row(translate("Reason"),
                             qualityMonitorModel.data.fallbackReason ?? '-'),
                       const SizedBox(height: 4),
                       Align(
@@ -628,19 +633,8 @@ class QualityMonitor extends StatelessWidget {
                         child: InkWell(
                           onTap: () {
                             final d = qualityMonitorModel.data;
-                            final report = [
-                              'Speed: ${d.speed ?? '-'}',
-                              'FPS: ${d.fps ?? '-'}',
-                              'Delay: ${d.delay ?? '-'}ms',
-                              'Bitrate: ${d.targetBitrate ?? '-'}kb',
-                              'Codec: ${d.codecFormat ?? '-'}',
-                              'Chroma: ${d.chroma ?? '-'}',
-                              'Queue: ${d.queueDelay ?? '-'}ms',
-                              'QoS: ${d.qosState ?? '-'}',
-                              'Hardware: ${d.hardware ?? '-'}',
-                              'Fallback: ${d.fallbackReason ?? '-'}',
-                            ].join('\n');
-                            Clipboard.setData(ClipboardData(text: report));
+                            Clipboard.setData(
+                                ClipboardData(text: d.buildReport()));
                           },
                           child: Text(
                             translate('Copy report'),

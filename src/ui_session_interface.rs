@@ -691,17 +691,27 @@ impl<T: InvokeUiSession> Session<T> {
                 | keys::OPTION_TARGET_BITRATE
                 | keys::OPTION_MAX_BITRATE
                 | keys::OPTION_MIN_FPS
+                | keys::OPTION_CUSTOM_FPS
                 | keys::OPTION_MAX_FPS
                 | keys::OPTION_MAX_QUEUE_MS
                 | keys::OPTION_ENABLE_HQ_VIDEO
                 | keys::OPTION_CHROMA_PREFERENCE
                 | keys::OPTION_ALLOW_CODEC_FALLBACK
+                | keys::OPTION_CODEC_PREFERENCE
         ) {
             if lc.is_hq_video_enabled() {
                 let (w, h) = lc.peer_display_size();
                 let profile = lc.get_video_profile(w, h);
                 let mut misc = Misc::new();
                 misc.set_option(lc.build_video_profile_option_message(&profile));
+                let mut msg_out = Message::new();
+                msg_out.set_misc(misc);
+                drop(lc);
+                self.send(Data::Message(msg_out));
+                return;
+            } else if k == keys::OPTION_ENABLE_HQ_VIDEO {
+                let mut misc = Misc::new();
+                misc.set_option(lc.build_disable_video_profile_option_message());
                 let mut msg_out = Message::new();
                 msg_out.set_misc(misc);
                 drop(lc);
@@ -1973,6 +1983,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     Some(t.qos_state.clone())
                 },
                 hardware: Some(t.hardware),
+                hq_diagnostics_updated: true,
                 ..Default::default()
             });
             handle_test_delay(t, peer).await;

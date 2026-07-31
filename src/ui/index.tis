@@ -93,7 +93,7 @@ class ConnectStatus: Reactor.Component {
     }
 
     event click $(#setup-server) () {
-        handler.open_url("https://rustdesk.com/blog/id-relay-set/");
+        open_custom_server_dialog();
     }
 }
 
@@ -601,17 +601,13 @@ class MyIdMenu: Reactor.Component {
         msgbox("custom-nocancel-nook-hasclose", translate("About") + " " + name, "<div style='line-height: 2em'> \
             <div>Version: " + handler.get_version() + " \
             <div>Fingerprint: " + handler.get_fingerprint() + " \
-            <div .link .custom-event url='https://rustdesk.com/privacy.html'>" + translate("Privacy Statement") + "</div> \
-            <div .link .custom-event url='https://rustdesk.com'>" + translate("Website") + "</div> \
+            <div>" + translate("Privacy Statement") + "</div> \
+            <div>" + translate("Website") + "</div> \
 	    <div style='background: #2c8cff; color: white; padding: 1em; margin-top: 1em;'>Copyright &copy; 2026 Purslane Tech Pte. Ltd.\
             <br />" + handler.get_license() + " \
             <p style='font-weight: bold'>" + translate("Slogan_tip") + "</p>\
             </div>\
-        </div>", "", function(el) {
-            if (el && el.attributes) {
-                handler.open_url(el.attributes['url']);
-            };
-        }, 400, get_msgbox_width());
+        </div>", "", function(el) {}, 400, get_msgbox_width());
     }
 
     event click $(menu#config-options>li) (_, me) {
@@ -714,7 +710,7 @@ class App: Reactor.Component
             <div .app>
                     <div .left-pane style={incoming_only ? "width:*" : ""}>
                     <div>
-                        {is_custom_client && handler.get_builtin_option("hide-powered-by-me") != "Y" ? <div .link #powered-by style="opacity:0.5;font-size:0.8em;text-decoration:underline">{translate('powered_by_me')}</div> : ""}
+                        {is_custom_client && handler.get_builtin_option("hide-powered-by-me") != "Y" ? <div #powered-by style="opacity:0.5;font-size:0.8em">{translate('powered_by_me')}</div> : ""}
                         <div .title style="flow:horizontal; position:relative; height:1.6em; line-height:1.6em">
                             <span>{translate('Your Desktop')}</span>
                             {outgoing_only ? <span .link #open-settings style="position:absolute; right:0; bottom:0; transform:scale(0.6); transform-origin:right bottom; opacity:0.85">{svg_menu}</span> : ""}
@@ -822,44 +818,12 @@ class UpgradeMe: Reactor.Component {
 
 class UpdateMe: Reactor.Component {
     function render() {
-        var update_or_download = "download"; // !is_win ? "download" : "update";
         return <div .install-me>
             <div>{translate('Status')}</div>
             <div>There is a newer version of {handler.get_app_name()} ({handler.get_new_version()}) available.</div>
-            {is_custom_client
-                ? <div style="font-size: 1em; font-weight: normal; text-align: left; padding-top: 1em;">{translate('Enable \"Auto update\" or contact your administrator for the latest version.')}</div>
-                : <div #install-me.link>{translate('Click to ' + update_or_download)}</div>}
+            <div style="font-size: 1em; font-weight: normal; text-align: left; padding-top: 1em;">{translate('Enable \"Auto update\" or contact your administrator for the latest version.')}</div>
             <div #download-percent style="display:hidden; padding-top: 1em;" />
         </div>;
-    }
-
-    event click $(#install-me) {
-        handler.open_url("https://rustdesk.com/download");
-        return;
-        if (!is_win) {
-            handler.open_url("https://rustdesk.com");
-            return;
-        }
-        var url = software_update_url + '.' + handler.get_software_ext();
-        var path = handler.get_software_store_path();
-        var onsuccess = function(md5) {
-            $(#download-percent).content(translate("Installing ..."));
-            handler.update_me(path);
-        };
-        var onerror = function(err) {
-            msgbox("custom-error", "Download Error", "Failed to download"); 
-        };
-        var onprogress = function(loaded, total) {
-            if (!total) total = 5 * 1024 * 1024;
-            var el = $(#download-percent);
-            el.style.set{display: "block"};
-            el.content("Downloading %" + (loaded * 100 / total));
-        };
-        stdout.println("Downloading " + url + " to " + path);
-        download(
-            url,
-            self.url(path),
-            onsuccess, onerror, onprogress);
     }
 }
 
@@ -877,7 +841,6 @@ class TrustMe: Reactor.Component {
             <div>{translate('Permissions')}</div>
             <div>{translate('config_acc')}</div>
             <div #trust-me .link>{translate('Configure')}</div>
-            <div #help-me .link>{translate('Help')}</div>
         </div>;
     }
 
@@ -886,9 +849,6 @@ class TrustMe: Reactor.Component {
         watch_trust();
     }
     
-    event click $(#help-me) {
-        handler.open_url(translate("doc_mac_permission"));
-    }
 }
 
 class CanScreenRecording: Reactor.Component {
@@ -897,7 +857,6 @@ class CanScreenRecording: Reactor.Component {
             <div>{translate('Permissions')}</div>
             <div>{translate('config_screen')}</div>
             <div #screen-recording .link>{translate('Configure')}</div>
-            <div #help-me .link>{translate('Help')}</div>
         </div>;
     }
 
@@ -906,9 +865,6 @@ class CanScreenRecording: Reactor.Component {
         watch_screen_recording();
     }
     
-    event click $(#help-me) {
-        handler.open_url(translate("doc_mac_permission"));
-    }
 }
 
 class InstallDaemon: Reactor.Component {
@@ -930,12 +886,7 @@ class FixWayland: Reactor.Component {
         return <div .trust-me>
             <div>{translate('Warning')}</div>
             <div>{translate('Login screen using Wayland is not supported')}</div>
-            <div #help-me .link>{translate('Help')}</div>
         </div>;
-    }
-
-    event click $(#help-me) {
-        handler.open_url(translate("doc_fix_wayland"));
     }
 }
 
@@ -944,12 +895,7 @@ class ModifyDefaultLogin: Reactor.Component {
         return <div .trust-me>
             <div>{translate('Warning')}</div>
             <div>{translate('wayland_experiment_tip')}</div>
-            <div #help-me .link>{translate('Help')}</div>
         </div>;
-    }
-
-    event click $(#help-me) {
-        handler.open_url(translate("doc_fix_wayland"));
     }
 }
 
@@ -1341,10 +1287,6 @@ event change $(#msgbox input[name='confirmation']) {
 }
 
 $(body).content(<div style="size:*"><App /><div #msgbox /></div>);
-
-event click $(#powered-by) {
-    handler.open_url("https://rustdesk.com");
-}
 
 event click $(#open-settings) (_, me) {
     showSettings();
