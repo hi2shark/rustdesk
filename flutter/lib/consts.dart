@@ -426,6 +426,7 @@ const kOptionMaxFps = 'max-fps';
 const kOptionMaxQueueMs = 'max-queue-ms';
 const kOptionEnableHqVideo = 'enable-hq-video';
 const kOptionChromaPreference = 'chroma-preference';
+const kOptionAllowCodecFallback = 'allow-codec-fallback';
 
 const kIgnoreDpi = true;
 

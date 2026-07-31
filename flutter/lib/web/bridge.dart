@@ -404,6 +404,9 @@ class RustdeskImpl {
       required int minFps,
       required int maxFps,
       required int targetFps,
+      required int maxQueueMs,
+      required String chroma,
+      required bool allowCodecFallback,
       dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', [
           'video-profile',
@@ -416,6 +419,9 @@ class RustdeskImpl {
             'min_fps': minFps,
             'max_fps': maxFps,
             'target_fps': targetFps,
+            'max_queue_ms': maxQueueMs,
+            'chroma': chroma,
+            'allow_codec_fallback': allowCodecFallback,
           })
         ]));
   }

@@ -643,7 +643,7 @@ class QualityMonitor extends StatelessWidget {
                             Clipboard.setData(ClipboardData(text: report));
                           },
                           child: Text(
-                            'Copy report',
+                            translate('Copy report'),
                             style: TextStyle(
                                 color: Colors.lightBlueAccent, fontSize: 12),
                           ),

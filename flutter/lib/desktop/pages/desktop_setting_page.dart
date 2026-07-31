@@ -2002,21 +2002,25 @@ class _DisplayState extends State<_Display> {
               label: 'Fixed bitrate',
               onChanged: onRateModeChanged),
           _bitrateSliders(context),
+          _hqExtraOptions(context),
         ],
       ],
     ]);
   }
 
   Widget _bitrateSliders(BuildContext context) {
-    final minB = double.tryParse(
+    var minB = double.tryParse(
             bind.mainGetUserDefaultOption(key: kOptionMinBitrate)) ??
         2000;
-    final targetB = double.tryParse(
+    var targetB = double.tryParse(
             bind.mainGetUserDefaultOption(key: kOptionTargetBitrate)) ??
         4000;
-    final maxB = double.tryParse(
+    var maxB = double.tryParse(
             bind.mainGetUserDefaultOption(key: kOptionMaxBitrate)) ??
         8000;
+    // Keep UI order consistent: min ≤ target ≤ max.
+    if (targetB < minB) targetB = minB;
+    if (maxB < targetB) maxB = targetB;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -2028,8 +2032,17 @@ class _DisplayState extends State<_Display> {
           max: 100000,
           divisions: 200,
           onChanged: (v) async {
+            final newMin = v.round();
             await bind.mainSetUserDefaultOption(
-                key: kOptionMinBitrate, value: v.round().toString());
+                key: kOptionMinBitrate, value: newMin.toString());
+            if (targetB < newMin) {
+              await bind.mainSetUserDefaultOption(
+                  key: kOptionTargetBitrate, value: newMin.toString());
+            }
+            if (maxB < newMin) {
+              await bind.mainSetUserDefaultOption(
+                  key: kOptionMaxBitrate, value: newMin.toString());
+            }
             setState(() {});
           },
         ),
@@ -2041,8 +2054,11 @@ class _DisplayState extends State<_Display> {
           max: 100000,
           divisions: 200,
           onChanged: (v) async {
+            var newTarget = v.round();
+            if (newTarget < minB) newTarget = minB.round();
+            if (newTarget > maxB) newTarget = maxB.round();
             await bind.mainSetUserDefaultOption(
-                key: kOptionTargetBitrate, value: v.round().toString());
+                key: kOptionTargetBitrate, value: newTarget.toString());
             setState(() {});
           },
         ),
@@ -2054,8 +2070,83 @@ class _DisplayState extends State<_Display> {
           max: 100000,
           divisions: 200,
           onChanged: (v) async {
+            final newMax = v.round();
             await bind.mainSetUserDefaultOption(
-                key: kOptionMaxBitrate, value: v.round().toString());
+                key: kOptionMaxBitrate, value: newMax.toString());
+            if (targetB > newMax) {
+              await bind.mainSetUserDefaultOption(
+                  key: kOptionTargetBitrate, value: newMax.toString());
+            }
+            if (minB > newMax) {
+              await bind.mainSetUserDefaultOption(
+                  key: kOptionMinBitrate, value: newMax.toString());
+            }
+            setState(() {});
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _hqExtraOptions(BuildContext context) {
+    final maxQueue = double.tryParse(
+            bind.mainGetUserDefaultOption(key: kOptionMaxQueueMs)) ??
+        150;
+    final chroma = bind.mainGetUserDefaultOption(key: kOptionChromaPreference);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('${translate('Max queue')}: ${maxQueue.round()} ms')
+            .marginOnly(left: 16, top: 8),
+        Slider(
+          value: maxQueue.clamp(50, 2000),
+          min: 50,
+          max: 2000,
+          divisions: 39,
+          onChanged: (v) async {
+            await bind.mainSetUserDefaultOption(
+                key: kOptionMaxQueueMs, value: v.round().toString());
+            setState(() {});
+          },
+        ),
+        Text(translate('Chroma preference'),
+                style: TextStyle(fontWeight: FontWeight.w500))
+            .marginOnly(left: 16, top: 4),
+        _Radio(context,
+            value: 'auto',
+            groupValue: chroma.isEmpty ? 'auto' : chroma,
+            label: 'Auto',
+            onChanged: (v) async {
+              await bind.mainSetUserDefaultOption(
+                  key: kOptionChromaPreference, value: v);
+              setState(() {});
+            }),
+        _Radio(context,
+            value: 'i420',
+            groupValue: chroma.isEmpty ? 'auto' : chroma,
+            label: '4:2:0',
+            onChanged: (v) async {
+              await bind.mainSetUserDefaultOption(
+                  key: kOptionChromaPreference, value: v);
+              setState(() {});
+            }),
+        _Radio(context,
+            value: 'i444',
+            groupValue: chroma.isEmpty ? 'auto' : chroma,
+            label: '4:4:4',
+            onChanged: (v) async {
+              await bind.mainSetUserDefaultOption(
+                  key: kOptionChromaPreference, value: v);
+              setState(() {});
+            }),
+        _Checkbox(
+          label: 'Allow codec fallback',
+          getValue: () =>
+              bind.mainGetUserDefaultOption(key: kOptionAllowCodecFallback) !=
+              'N',
+          setValue: (v) async {
+            await bind.mainSetUserDefaultOption(
+                key: kOptionAllowCodecFallback, value: v ? 'Y' : 'N');
             setState(() {});
           },
         ),
