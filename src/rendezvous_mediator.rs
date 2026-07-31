@@ -159,6 +159,13 @@ impl RendezvousMediator {
             {
                 let mut futs = Vec::new();
                 let servers = Config::get_rendezvous_servers();
+                if servers.is_empty() {
+                    log::warn!(
+                        "No rendezvous server configured. Please set ID/Relay Server (custom-rendezvous-server)."
+                    );
+                    sleep(3.).await;
+                    continue;
+                }
                 SHOULD_EXIT.store(false, Ordering::SeqCst);
                 MANUAL_RESTARTED.store(false, Ordering::SeqCst);
                 for host in servers.clone() {

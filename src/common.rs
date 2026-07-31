@@ -940,21 +940,17 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
 }
 
 pub fn check_software_update() {
-    if is_custom_client() {
-        return;
-    }
-    let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
-    if config::option2bool(keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
-        std::thread::spawn(move || allow_err!(do_check_software_update()));
-    }
+    // Official version check disabled (no api.rustdesk.com).
 }
 
-// No need to check `danger_accept_invalid_cert` for now.
-// Because the url is always `https://api.rustdesk.com/version/latest`.
+// Official version check URL is empty; skip remote request.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
     let (request, url) =
         hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+    if url.is_empty() {
+        return Ok(());
+    }
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(&url, &proxy_conf);
     let tls_type = get_cached_tls_type(tls_url);
@@ -1081,7 +1077,8 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    // No official admin.rustdesk.com fallback — require self-hosted api/id server.
+    "".to_owned()
 }
 
 #[inline]
@@ -1810,17 +1807,15 @@ pub async fn get_key(sync: bool) -> String {
         }
     }
     #[cfg(target_os = "ios")]
-    let mut key = Config::get_option("key");
+    let key = Config::get_option("key");
     #[cfg(not(target_os = "ios"))]
-    let mut key = if sync {
+    let key = if sync {
         Config::get_option("key")
     } else {
         let mut options = crate::ipc::get_options_async().await;
         options.remove("key").unwrap_or_default()
     };
-    if key.is_empty() {
-        key = config::RS_PUB_KEY.to_owned();
-    }
+    // No official RS_PUB_KEY fallback — key must come from user/self-hosted config.
     key
 }
 
