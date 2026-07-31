@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 use hbb_common::video_profile::{
-    QosState, RateControlMode, VideoProfile, VideoProfileType, VideoRateConfig,
+    QosState, RateControlMode, VideoProfile, VideoProfileType, VideoRateConfig, BASE_1080P_KBPS,
 };
 
 /*
@@ -149,6 +149,7 @@ pub struct VideoQoS {
     need_keyframe: bool,
     drop_old_frames: bool,
     encoder_fallback_reason: String,
+    encoder_hardware: bool,
 }
 
 impl Default for VideoQoS {
@@ -176,6 +177,7 @@ impl Default for VideoQoS {
             need_keyframe: false,
             drop_old_frames: false,
             encoder_fallback_reason: String::new(),
+            encoder_hardware: false,
         }
     }
 }
@@ -202,25 +204,29 @@ impl VideoQoS {
         self.bitrate_store = bitrate;
     }
 
-    // Get stored bitrate
-    pub fn bitrate(&self) -> u32 {
-        if self.hq_enabled && self.hq_current_kbps > 0 {
-            self.hq_current_kbps
+    /// Unified HQ/legacy bitrate lookup so `bitrate()` and `current_kbps()` agree.
+    fn effective_kbps(&self) -> u32 {
+        if self.hq_enabled {
+            if self.hq_current_kbps > 0 {
+                self.hq_current_kbps
+            } else {
+                self.hq_target_kbps
+            }
         } else {
             self.bitrate_store
         }
     }
 
+    // Get stored bitrate
+    pub fn bitrate(&self) -> u32 {
+        self.effective_kbps()
+    }
+
     // Get current bitrate ratio with bounds checking
     pub fn ratio(&mut self) -> f32 {
         if self.hq_enabled {
-            const BASE_1080P: f32 = 2073.0;
-            let kbps = if self.hq_current_kbps > 0 {
-                self.hq_current_kbps
-            } else {
-                self.hq_target_kbps
-            };
-            return (kbps as f32 / BASE_1080P).clamp(BR_MIN_HIGH_RESOLUTION, BR_MAX);
+            let kbps = self.effective_kbps();
+            return (kbps as f32 / BASE_1080P_KBPS).clamp(BR_MIN_HIGH_RESOLUTION, BR_MAX);
         }
         if self.ratio < BR_MIN_HIGH_RESOLUTION || self.ratio > BR_MAX {
             self.ratio = BR_BALANCED;
@@ -245,11 +251,7 @@ impl VideoQoS {
     }
 
     pub fn current_kbps(&self) -> u32 {
-        if self.hq_enabled {
-            self.hq_current_kbps
-        } else {
-            self.bitrate_store
-        }
+        self.effective_kbps()
     }
 
     pub fn take_need_keyframe(&mut self) -> bool {
@@ -272,6 +274,29 @@ impl VideoQoS {
         &self.encoder_fallback_reason
     }
 
+    pub fn set_encoder_hardware(&mut self, hw: bool) {
+        self.encoder_hardware = hw;
+    }
+
+    pub fn is_encoder_hardware(&self) -> bool {
+        self.encoder_hardware
+    }
+
+    /// Clear pending-frame accounting without driving the QoS state machine.
+    pub fn clear_pending_frames(&mut self) {
+        self.pending_frames.clear();
+    }
+
+    fn pending_frame_limit(&self) -> usize {
+        let fps = self.fps().max(1) as u64;
+        let max_queue_ms = self
+            .hq_rate
+            .as_ref()
+            .map(|r| r.max_queue_ms as u64)
+            .unwrap_or(150);
+        ((fps * max_queue_ms) / 1000).clamp(30, 120) as usize
+    }
+
     pub fn on_frame_enqueue(&mut self, bytes: u32) -> u64 {
         self.frame_seq = self.frame_seq.wrapping_add(1);
         let seq = self.frame_seq;
@@ -280,7 +305,8 @@ impl VideoQoS {
             enqueue_instant: Instant::now(),
             bytes,
         });
-        while self.pending_frames.len() > 120 {
+        let limit = self.pending_frame_limit();
+        while self.pending_frames.len() > limit {
             self.pending_frames.pop_front();
         }
         seq
@@ -302,14 +328,8 @@ impl VideoQoS {
                     self.hq_on_queue_delay(queue_delay);
                 }
             }
-        } else if let Some(frame) = self.pending_frames.pop_front() {
-            let elapsed = frame.enqueue_instant.elapsed().as_millis() as u32;
-            let queue_delay = elapsed.saturating_sub(baseline_rtt);
-            self.last_queue_delay_ms = queue_delay;
-            if self.hq_enabled {
-                self.hq_on_queue_delay(queue_delay);
-            }
         }
+        // Unmatched ack: ignore (do not borrow another frame's delay).
     }
 
     pub fn on_video_frame_fetched(&mut self) {
@@ -384,6 +404,11 @@ impl VideoQoS {
     }
 
     /// Apply an HQ VideoProfile from OptionMessage negotiation.
+    ///
+    /// Also stores a legacy `user.quality` Custom ratio so that if HQ is later
+    /// disabled (all HQ peers disconnect / `refresh_hq_from_users` clears
+    /// `hq_enabled`), `latest_quality()` can still fall back to a sensible ratio
+    /// derived from the last HQ target bitrate.
     pub fn user_video_profile(&mut self, id: i32, profile: VideoProfile) {
         let rate = profile.rate.clone().clamp();
         if let Some(user) = self.users.get_mut(&id) {
@@ -404,6 +429,9 @@ impl VideoQoS {
         );
     }
 
+    /// Recompute session-level HQ state from the newest per-user profile.
+    /// When no user still has a rate_config, HQ is disabled and the legacy
+    /// delay/ratio path takes over again (using each user's stored `quality`).
     fn refresh_hq_from_users(&mut self) {
         let latest = self
             .users
@@ -518,7 +546,10 @@ impl VideoQoS {
                 self.hq_good_samples = 0;
             }
         }
-        self.ratio = (self.hq_current_kbps as f32 / 2073.0).clamp(BR_MIN_HIGH_RESOLUTION, BR_MAX);
+        // Keep self.ratio in sync for non-HQ readers / logging; the HQ
+        // ratio() getter recomputes from effective_kbps() and ignores this field.
+        self.ratio =
+            (self.hq_current_kbps as f32 / BASE_1080P_KBPS).clamp(BR_MIN_HIGH_RESOLUTION, BR_MAX);
     }
 
     fn apply_hq_degradation_or_recovery(&mut self, congested: bool, rate: &VideoRateConfig) {
@@ -547,6 +578,8 @@ impl VideoQoS {
                     if self.fps > rate.min_fps {
                         self.fps = (self.fps.saturating_sub(3)).max(rate.min_fps);
                     }
+                } else if self.fps < rate.target_fps {
+                    self.fps = (self.fps + 1).min(rate.target_fps);
                 }
             }
         }
@@ -948,5 +981,99 @@ impl RttCalculator {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod hq_tests {
+    use super::*;
+    use hbb_common::video_profile::{
+        RateControlMode, ResolutionTier, VideoProfile, VideoProfileType,
+    };
+
+    #[test]
+    fn hq_profile_sets_current_kbps_to_target() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        let profile = VideoProfile::office_clear(ResolutionTier::P1080);
+        qos.user_video_profile(1, profile.clone());
+        assert!(qos.hq_enabled());
+        assert_eq!(qos.current_kbps(), profile.rate.target_kbps);
+        assert_eq!(qos.bitrate(), profile.rate.target_kbps);
+    }
+
+    #[test]
+    fn congested_queue_delay_reduces_current_kbps() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        let profile = VideoProfile::office_clear(ResolutionTier::P1080);
+        let target = profile.rate.target_kbps;
+        qos.user_video_profile(1, profile);
+        assert_eq!(qos.current_kbps(), target);
+
+        // Simulate congested queue delay (> hold / max_queue_ms).
+        qos.hq_on_queue_delay(200);
+        assert!(qos.current_kbps() < target);
+        assert_eq!(qos.hq_state(), QosState::Congested);
+
+        // The live bitrate exposed to check_qos must track hq_current_kbps.
+        let mut rate = qos.hq_rate_config().cloned().unwrap();
+        rate.target_kbps = qos.current_kbps().clamp(rate.min_kbps, rate.max_kbps);
+        assert_eq!(rate.target_kbps, qos.current_kbps());
+        assert!(rate.target_kbps < target);
+    }
+
+    #[test]
+    fn clear_pending_frames_does_not_drive_state_machine() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.user_video_profile(1, VideoProfile::tcp_stable(ResolutionTier::P1080));
+        let before = qos.hq_state();
+        let kbps_before = qos.current_kbps();
+        qos.on_frame_enqueue(1000);
+        qos.on_frame_enqueue(1000);
+        qos.clear_pending_frames();
+        assert_eq!(qos.pending_video_bytes(), 0);
+        assert_eq!(qos.hq_state(), before);
+        assert_eq!(qos.current_kbps(), kbps_before);
+    }
+
+    #[test]
+    fn unmatched_frame_ack_does_not_pop_front() {
+        let mut qos = VideoQoS::default();
+        let seq = qos.on_frame_enqueue(500);
+        qos.on_frame_delivered(seq.wrapping_add(999));
+        assert_eq!(qos.pending_video_bytes(), 500);
+    }
+
+    #[test]
+    fn tcp_stable_recovers_fps_after_congestion() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        let mut profile = VideoProfile::tcp_stable(ResolutionTier::P1080);
+        profile.rate.mode = RateControlMode::Auto;
+        let target_fps = profile.rate.target_fps;
+        qos.user_video_profile(1, profile);
+        assert_eq!(qos.fps(), target_fps);
+
+        qos.hq_on_queue_delay(200); // Congested → FPS drops
+        let fps_after_drop = qos.fps();
+        assert!(fps_after_drop < target_fps);
+
+        // Clear recovery freeze so ProbeUp can raise FPS again.
+        qos.hq_freeze_until = None;
+        for _ in 0..12 {
+            qos.hq_on_queue_delay(30);
+        }
+        assert!(qos.fps() > fps_after_drop);
+    }
+
+    #[test]
+    fn named_preset_uses_resolution_tier_on_server() {
+        let p4k = VideoProfile::for_type(VideoProfileType::OfficeClear, 3840, 2160);
+        assert_eq!(p4k.rate.target_kbps, 40_000);
+        let p1080 = VideoProfile::for_type(VideoProfileType::OfficeClear, 1920, 1080);
+        assert_eq!(p1080.rate.target_kbps, 16_000);
+        assert!(p4k.rate.target_kbps > p1080.rate.target_kbps);
     }
 }
