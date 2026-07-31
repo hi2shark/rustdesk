@@ -1803,6 +1803,7 @@ class _DisplayState extends State<_Display> {
       viewStyle(context),
       scrollStyle(context),
       imageQuality(context),
+      videoProfile(context),
       codec(context),
       if (isDesktop) trackpadSpeed(context),
       if (!isWeb) privacyModeImpl(context),
@@ -1914,6 +1915,152 @@ class _DisplayState extends State<_Display> {
         child: customImageQualitySetting(),
       )
     ]);
+  }
+
+  Widget videoProfile(BuildContext context) {
+    onProfileChanged(String value) async {
+      await bind.mainSetUserDefaultOption(
+          key: kOptionVideoProfile, value: value);
+      await bind.mainSetUserDefaultOption(
+          key: kOptionEnableHqVideo, value: 'Y');
+      // Map preset to legacy image quality for older peers.
+      if (value == kVideoProfileOfficeClear) {
+        await bind.mainSetUserDefaultOption(
+            key: kOptionImageQuality, value: kRemoteImageQualityBest);
+      } else if (value == kVideoProfileMotionSmooth ||
+          value == kVideoProfileTcpStable) {
+        await bind.mainSetUserDefaultOption(
+            key: kOptionImageQuality, value: kRemoteImageQualityCustom);
+        await bind.mainSetUserDefaultOption(
+            key: 'custom_image_quality', value: '100');
+      }
+      setState(() {});
+    }
+
+    onRateModeChanged(String value) async {
+      await bind.mainSetUserDefaultOption(
+          key: kOptionRateControlMode, value: value);
+      setState(() {});
+    }
+
+    final profile =
+        bind.mainGetUserDefaultOption(key: kOptionVideoProfile);
+    final rateMode =
+        bind.mainGetUserDefaultOption(key: kOptionRateControlMode);
+    final hqEnabled =
+        bind.mainGetUserDefaultOption(key: kOptionEnableHqVideo) == 'Y';
+
+    return _Card(title: 'HQ Video Profile', children: [
+      _Checkbox(
+        label: 'Enable HQ video engine',
+        getValue: () =>
+            bind.mainGetUserDefaultOption(key: kOptionEnableHqVideo) == 'Y',
+        setValue: (v) async {
+          await bind.mainSetUserDefaultOption(
+              key: kOptionEnableHqVideo, value: v ? 'Y' : 'N');
+          setState(() {});
+        },
+      ),
+      if (hqEnabled) ...[
+        _Radio(context,
+            value: kVideoProfileOfficeClear,
+            groupValue: profile.isEmpty ? kVideoProfileCustom : profile,
+            label: 'Office clear (VP9 I444)',
+            onChanged: onProfileChanged),
+        _Radio(context,
+            value: kVideoProfileMotionSmooth,
+            groupValue: profile.isEmpty ? kVideoProfileCustom : profile,
+            label: 'Motion smooth (H.265 HW)',
+            onChanged: onProfileChanged),
+        _Radio(context,
+            value: kVideoProfileTcpStable,
+            groupValue: profile.isEmpty ? kVideoProfileCustom : profile,
+            label: 'TCP stable',
+            onChanged: onProfileChanged),
+        _Radio(context,
+            value: kVideoProfileCustom,
+            groupValue: profile.isEmpty ? kVideoProfileCustom : profile,
+            label: 'Custom',
+            onChanged: onProfileChanged),
+        if (profile == kVideoProfileCustom || profile.isEmpty) ...[
+          Text(translate('Rate control'),
+                  style: TextStyle(fontWeight: FontWeight.w500))
+              .marginOnly(left: 16, top: 8),
+          _Radio(context,
+              value: kRateControlAuto,
+              groupValue: rateMode.isEmpty ? kRateControlAuto : rateMode,
+              label: 'Auto',
+              onChanged: onRateModeChanged),
+          _Radio(context,
+              value: kRateControlStableQuality,
+              groupValue: rateMode.isEmpty ? kRateControlAuto : rateMode,
+              label: 'Stable quality',
+              onChanged: onRateModeChanged),
+          _Radio(context,
+              value: kRateControlFixedBitrate,
+              groupValue: rateMode.isEmpty ? kRateControlAuto : rateMode,
+              label: 'Fixed bitrate',
+              onChanged: onRateModeChanged),
+          _bitrateSliders(context),
+        ],
+      ],
+    ]);
+  }
+
+  Widget _bitrateSliders(BuildContext context) {
+    final minB = double.tryParse(
+            bind.mainGetUserDefaultOption(key: kOptionMinBitrate)) ??
+        2000;
+    final targetB = double.tryParse(
+            bind.mainGetUserDefaultOption(key: kOptionTargetBitrate)) ??
+        4000;
+    final maxB = double.tryParse(
+            bind.mainGetUserDefaultOption(key: kOptionMaxBitrate)) ??
+        8000;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('${translate('Min bitrate')}: ${minB.round()} kbps')
+            .marginOnly(left: 16, top: 4),
+        Slider(
+          value: minB.clamp(500, 100000),
+          min: 500,
+          max: 100000,
+          divisions: 200,
+          onChanged: (v) async {
+            await bind.mainSetUserDefaultOption(
+                key: kOptionMinBitrate, value: v.round().toString());
+            setState(() {});
+          },
+        ),
+        Text('${translate('Target bitrate')}: ${targetB.round()} kbps')
+            .marginOnly(left: 16),
+        Slider(
+          value: targetB.clamp(500, 100000),
+          min: 500,
+          max: 100000,
+          divisions: 200,
+          onChanged: (v) async {
+            await bind.mainSetUserDefaultOption(
+                key: kOptionTargetBitrate, value: v.round().toString());
+            setState(() {});
+          },
+        ),
+        Text('${translate('Max bitrate')}: ${maxB.round()} kbps')
+            .marginOnly(left: 16),
+        Slider(
+          value: maxB.clamp(500, 100000),
+          min: 500,
+          max: 100000,
+          divisions: 200,
+          onChanged: (v) async {
+            await bind.mainSetUserDefaultOption(
+                key: kOptionMaxBitrate, value: v.round().toString());
+            setState(() {});
+          },
+        ),
+      ],
+    );
   }
 
   Widget trackpadSpeed(BuildContext context) {

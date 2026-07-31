@@ -844,6 +844,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       state: widget.state,
       setFullscreen: _setFullscreen,
     ));
+    toolbarItems.add(_HqStatusLabel(ffi: widget.ffi));
     // Do not show keyboard for camera connection type.
     if (widget.ffi.connType == ConnType.defaultConn) {
       toolbarItems.add(_KeyboardMenu(id: widget.id, ffi: widget.ffi));
@@ -1536,6 +1537,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         viewStyle(customPercent: _customPercent),
         scrollStyle(state, colorScheme),
         imageQuality(),
+        hqVideoProfile(),
         codec(),
         if (ffi.connType == ConnType.defaultConn)
           _ResolutionsMenu(
@@ -1757,6 +1759,61 @@ class _DisplayMenuState extends State<_DisplayMenu> {
                     child: e.child,
                     ffi: ffi))
                 .toList(),
+          );
+        });
+  }
+
+  hqVideoProfile() {
+    Future<void> applyProfile(String profile) async {
+      await bind.sessionPeerOption(
+          sessionId: ffi.sessionId,
+          name: kOptionVideoProfile,
+          value: profile);
+      await bind.sessionPeerOption(
+          sessionId: ffi.sessionId,
+          name: kOptionEnableHqVideo,
+          value: 'Y');
+    }
+
+    return futureBuilder(
+        future: bind.sessionGetPeerOption(
+            sessionId: ffi.sessionId, name: kOptionVideoProfile),
+        hasData: (data) {
+          final groupValue =
+              (data as String).isEmpty ? kVideoProfileCustom : data;
+          return _SubmenuButton(
+            ffi: widget.ffi,
+            child: Text(translate('HQ Video Profile')),
+            menuChildren: [
+              RdoMenuButton<String>(
+                value: kVideoProfileOfficeClear,
+                groupValue: groupValue,
+                onChanged: (v) => v == null ? null : applyProfile(v),
+                child: Text(translate('Office clear')),
+                ffi: ffi,
+              ),
+              RdoMenuButton<String>(
+                value: kVideoProfileMotionSmooth,
+                groupValue: groupValue,
+                onChanged: (v) => v == null ? null : applyProfile(v),
+                child: Text(translate('Motion smooth')),
+                ffi: ffi,
+              ),
+              RdoMenuButton<String>(
+                value: kVideoProfileTcpStable,
+                groupValue: groupValue,
+                onChanged: (v) => v == null ? null : applyProfile(v),
+                child: Text(translate('TCP stable')),
+                ffi: ffi,
+              ),
+              RdoMenuButton<String>(
+                value: kVideoProfileCustom,
+                groupValue: groupValue,
+                onChanged: (v) => v == null ? null : applyProfile(v),
+                child: Text(translate('Custom')),
+                ffi: ffi,
+              ),
+            ],
           );
         });
   }
@@ -3577,5 +3634,49 @@ class _MinimizedMonitorSwitchButton extends StatelessWidget {
         ),
       );
     });
+  }
+}
+
+/// Compact HQ status line: `H.265 HW | 28 Mbps | Queue 42 ms`
+class _HqStatusLabel extends StatelessWidget {
+  final FFI ffi;
+  const _HqStatusLabel({required this.ffi});
+
+  @override
+  Widget build(BuildContext context) {
+    return ChangeNotifierProvider.value(
+      value: ffi.qualityMonitorModel,
+      child: Consumer<QualityMonitorModel>(
+        builder: (context, model, _) {
+          final d = model.data;
+          final codec = d.codecFormat;
+          if (codec == null || codec.isEmpty) {
+            return const SizedBox.shrink();
+          }
+          final hw = d.hardware == 'true' ? ' HW' : '';
+          final bitrate = d.targetBitrate != null
+              ? '${(int.tryParse(d.targetBitrate!) ?? 0) ~/ 1000} Mbps'
+              : null;
+          final queue =
+              d.queueDelay != null ? 'Queue ${d.queueDelay} ms' : null;
+          final parts = <String>[
+            '$codec$hw',
+            if (bitrate != null) bitrate,
+            if (queue != null) queue,
+          ];
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: Text(
+              parts.join(' | '),
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 }

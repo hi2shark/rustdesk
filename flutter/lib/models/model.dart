@@ -3508,6 +3508,10 @@ class QualityMonitorData {
   String? targetBitrate;
   String? codecFormat;
   String? chroma;
+  String? queueDelay;
+  String? fallbackReason;
+  String? qosState;
+  String? hardware;
 }
 
 class QualityMonitorModel with ChangeNotifier {
@@ -3569,6 +3573,22 @@ class QualityMonitorModel with ChangeNotifier {
       }
       if (evt.containsKey('chroma') && (evt['chroma'] as String).isNotEmpty) {
         _data.chroma = evt['chroma'];
+      }
+      if (evt.containsKey('queue_delay') &&
+          (evt['queue_delay'] as String).isNotEmpty) {
+        _data.queueDelay = evt['queue_delay'];
+      }
+      if (evt.containsKey('fallback_reason') &&
+          (evt['fallback_reason'] as String).isNotEmpty) {
+        _data.fallbackReason = evt['fallback_reason'];
+      }
+      if (evt.containsKey('qos_state') &&
+          (evt['qos_state'] as String).isNotEmpty) {
+        _data.qosState = evt['qos_state'];
+      }
+      if (evt.containsKey('hardware') &&
+          (evt['hardware'] as String).isNotEmpty) {
+        _data.hardware = evt['hardware'];
       }
       notifyListeners();
     } catch (e) {

@@ -406,6 +406,27 @@ const kRemoteImageQualityLow = 'low';
 /// [kRemoteImageQualityCustom] Custom image quality.
 const kRemoteImageQualityCustom = 'custom';
 
+/// HQ video profile types
+const kVideoProfileOfficeClear = 'office-clear';
+const kVideoProfileMotionSmooth = 'motion-smooth';
+const kVideoProfileTcpStable = 'tcp-stable';
+const kVideoProfileCustom = 'custom';
+
+const kRateControlAuto = 'auto';
+const kRateControlStableQuality = 'stable-quality';
+const kRateControlFixedBitrate = 'fixed-bitrate';
+
+const kOptionVideoProfile = 'video-profile';
+const kOptionRateControlMode = 'rate-control-mode';
+const kOptionMinBitrate = 'min-bitrate';
+const kOptionTargetBitrate = 'target-bitrate';
+const kOptionMaxBitrate = 'max-bitrate';
+const kOptionMinFps = 'min-fps';
+const kOptionMaxFps = 'max-fps';
+const kOptionMaxQueueMs = 'max-queue-ms';
+const kOptionEnableHqVideo = 'enable-hq-video';
+const kOptionChromaPreference = 'chroma-preference';
+
 const kIgnoreDpi = true;
 
 const Set<PointerDeviceKind> kTouchBasedDeviceKinds = {

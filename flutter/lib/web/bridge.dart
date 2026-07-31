@@ -394,6 +394,38 @@ class RustdeskImpl {
         () => js.context.callMethod('setByName', ['custom-fps', fps]));
   }
 
+  Future<void> sessionSetVideoProfile(
+      {required UuidValue sessionId,
+      required String profileType,
+      required String rateMode,
+      required int minKbps,
+      required int targetKbps,
+      required int maxKbps,
+      required int minFps,
+      required int maxFps,
+      required int targetFps,
+      dynamic hint}) {
+    return Future(() => js.context.callMethod('setByName', [
+          'video-profile',
+          jsonEncode({
+            'profile_type': profileType,
+            'rate_mode': rateMode,
+            'min_kbps': minKbps,
+            'target_kbps': targetKbps,
+            'max_kbps': maxKbps,
+            'min_fps': minFps,
+            'max_fps': maxFps,
+            'target_fps': targetFps,
+          })
+        ]));
+  }
+
+  Future<String> sessionGetVideoProfile(
+      {required UuidValue sessionId, dynamic hint}) {
+    return Future(() =>
+        js.context.callMethod('getByName', ['video-profile']) ?? '');
+  }
+
   Future<void> sessionLockScreen({required UuidValue sessionId, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', ['lock_screen']));
   }

@@ -1,6 +1,7 @@
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:debounce_throttle/debounce_throttle.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
@@ -606,6 +607,48 @@ class QualityMonitor extends StatelessWidget {
                       _row(
                           "Codec", qualityMonitorModel.data.codecFormat ?? '-'),
                       _row("Chroma", qualityMonitorModel.data.chroma ?? '-'),
+                      if (qualityMonitorModel.data.queueDelay != null)
+                        _row("Queue",
+                            "${qualityMonitorModel.data.queueDelay}ms"),
+                      if (qualityMonitorModel.data.qosState != null)
+                        _row("QoS", qualityMonitorModel.data.qosState ?? '-'),
+                      if (qualityMonitorModel.data.hardware != null)
+                        _row(
+                            "HW",
+                            qualityMonitorModel.data.hardware == 'true'
+                                ? 'Yes'
+                                : 'No'),
+                      if ((qualityMonitorModel.data.fallbackReason ?? '')
+                          .isNotEmpty)
+                        _row("Fallback",
+                            qualityMonitorModel.data.fallbackReason ?? '-'),
+                      const SizedBox(height: 4),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: InkWell(
+                          onTap: () {
+                            final d = qualityMonitorModel.data;
+                            final report = [
+                              'Speed: ${d.speed ?? '-'}',
+                              'FPS: ${d.fps ?? '-'}',
+                              'Delay: ${d.delay ?? '-'}ms',
+                              'Bitrate: ${d.targetBitrate ?? '-'}kb',
+                              'Codec: ${d.codecFormat ?? '-'}',
+                              'Chroma: ${d.chroma ?? '-'}',
+                              'Queue: ${d.queueDelay ?? '-'}ms',
+                              'QoS: ${d.qosState ?? '-'}',
+                              'Hardware: ${d.hardware ?? '-'}',
+                              'Fallback: ${d.fallbackReason ?? '-'}',
+                            ].join('\n');
+                            Clipboard.setData(ClipboardData(text: report));
+                          },
+                          child: Text(
+                            'Copy report',
+                            style: TextStyle(
+                                color: Colors.lightBlueAccent, fontSize: 12),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 )
