@@ -3,12 +3,8 @@ use hbb_common::password_security;
 use hbb_common::{
     allow_err,
     bytes::Bytes,
-    config::{self, keys::*, Config, LocalConfig, PeerConfig, CONNECT_TIMEOUT, RENDEZVOUS_PORT},
-    directories_next,
-    futures::future::join_all,
-    log,
-    rendezvous_proto::*,
-    tokio,
+    config::{self, keys::*, Config, LocalConfig, PeerConfig},
+    directories_next, log, tokio,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::{
@@ -28,8 +24,6 @@ use crate::common::SOFTWARE_UPDATE_URL;
 use crate::hbbs_http::account;
 #[cfg(not(any(target_os = "ios")))]
 use crate::ipc;
-
-type Message = RendezvousMessage;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub type Children = Arc<Mutex<(bool, HashMap<(String, String), Child>)>>;
@@ -848,9 +842,8 @@ pub fn reset_async_job_status() {
 #[inline]
 pub fn change_id(id: String) {
     reset_async_job_status();
-    let old_id = get_id();
     std::thread::spawn(move || {
-        change_id_shared(id, old_id);
+        change_id_shared(id);
     });
 }
 
@@ -1460,13 +1453,13 @@ const UNKNOWN_ERROR: &'static str = "Unknown error";
 
 #[inline]
 #[tokio::main(flavor = "current_thread")]
-pub async fn change_id_shared(id: String, old_id: String) -> String {
-    let res = change_id_shared_(id, old_id).await.to_owned();
+pub async fn change_id_shared(id: String) -> String {
+    let res = change_id_shared_(id).await.to_owned();
     *ASYNC_JOB_STATUS.lock().unwrap() = res.clone();
     res
 }
 
-pub async fn change_id_shared_(id: String, old_id: String) -> &'static str {
+pub async fn change_id_shared_(id: String) -> &'static str {
     if !hbb_common::is_valid_custom_id(&id) {
         log::debug!(
             "debugging invalid id: \"{id}\", len: {}, base64: \"{}\"",
@@ -1478,112 +1471,19 @@ pub async fn change_id_shared_(id: String, old_id: String) -> &'static str {
         return INVALID_FORMAT;
     }
 
+    // OSS hbbs does not implement the TCP ID-change preflight. Persisting the new
+    // ID with key_confirmed=false makes the normal rendezvous loop register it.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let uuid = Bytes::from(
-        hbb_common::machine_uid::get()
-            .unwrap_or("".to_owned())
-            .as_bytes()
-            .to_vec(),
-    );
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    let uuid = Bytes::from(hbb_common::get_uuid());
-
-    if uuid.is_empty() {
-        log::error!("Failed to change id, uuid is_empty");
+    if let Err(err) = crate::ipc::set_config_async("id", id.to_owned()).await {
+        log::error!("Failed to save custom id: {err}");
         return UNKNOWN_ERROR;
     }
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let rendezvous_servers = crate::ipc::get_rendezvous_servers(1_000).await;
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    let rendezvous_servers = Config::get_rendezvous_servers();
-
-    let mut futs = Vec::new();
-    let err: Arc<Mutex<&str>> = Default::default();
-    for rendezvous_server in rendezvous_servers {
-        let err = err.clone();
-        let id = id.to_owned();
-        let uuid = uuid.clone();
-        let old_id = old_id.clone();
-        futs.push(tokio::spawn(async move {
-            let tmp = check_id(rendezvous_server, old_id, id, uuid).await;
-            if !tmp.is_empty() {
-                *err.lock().unwrap() = tmp;
-            }
-        }));
-    }
-    join_all(futs).await;
-    let err = *err.lock().unwrap();
-    if err.is_empty() {
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        crate::ipc::set_config_async("id", id.to_owned()).await.ok();
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        {
-            Config::set_key_confirmed(false);
-            Config::set_id(&id);
-        }
-    }
-    err
-}
-
-async fn check_id(
-    rendezvous_server: String,
-    old_id: String,
-    id: String,
-    uuid: Bytes,
-) -> &'static str {
-    if let Ok(mut socket) = hbb_common::socket_client::connect_tcp(
-        crate::check_port(rendezvous_server, RENDEZVOUS_PORT),
-        CONNECT_TIMEOUT,
-    )
-    .await
     {
-        let mut msg_out = Message::new();
-        msg_out.set_register_pk(RegisterPk {
-            old_id,
-            id,
-            uuid,
-            ..Default::default()
-        });
-        let mut ok = false;
-        if socket.send(&msg_out).await.is_ok() {
-            if let Some(msg_in) =
-                crate::common::get_next_nonkeyexchange_msg(&mut socket, None).await
-            {
-                match msg_in.union {
-                    Some(rendezvous_message::Union::RegisterPkResponse(rpr)) => {
-                        match rpr.result.enum_value() {
-                            Ok(register_pk_response::Result::OK) => {
-                                ok = true;
-                            }
-                            Ok(register_pk_response::Result::ID_EXISTS) => {
-                                return "Not available";
-                            }
-                            Ok(register_pk_response::Result::TOO_FREQUENT) => {
-                                return "Too frequent";
-                            }
-                            Ok(register_pk_response::Result::NOT_SUPPORT) => {
-                                return "server_not_support";
-                            }
-                            Ok(register_pk_response::Result::SERVER_ERROR) => {
-                                return "Server error";
-                            }
-                            Ok(register_pk_response::Result::INVALID_ID_FORMAT) => {
-                                return INVALID_FORMAT;
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if !ok {
-            return UNKNOWN_ERROR;
-        }
-    } else {
-        return "Failed to connect to rendezvous server";
+        Config::set_key_confirmed(false);
+        Config::set_id(&id);
     }
+
     ""
 }
 
