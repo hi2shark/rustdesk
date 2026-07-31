@@ -54,7 +54,7 @@ void setTemporaryPasswordLengthDialog(
 }
 
 void showServerSettings(OverlayDialogManager dialogManager,
-    void Function(VoidCallback) setState) async {
+    void Function(VoidCallback)? setState) async {
   Map<String, dynamic> options = {};
   try {
     options = jsonDecode(await bind.mainGetOptions());
