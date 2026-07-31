@@ -1028,12 +1028,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
   }
 
   Widget changeId() {
-    return ChangeNotifierProvider.value(
-        value: gFFI.serverModel,
-        child: Consumer<ServerModel>(builder: ((context, model, child) {
-          return _Button('Change ID', changeIdDialog,
-              enabled: !locked && model.connectStatus > 0);
-        })));
+    return _Button('Change ID', changeIdDialog, enabled: !locked);
   }
 
   Widget permissions(context) {

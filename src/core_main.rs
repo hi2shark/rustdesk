@@ -482,8 +482,7 @@ pub fn core_main() -> Option<Vec<String>> {
             }
             if args.len() == 2 {
                 if crate::platform::is_installed() && is_root() {
-                    let old_id = crate::ipc::get_id();
-                    let mut res = crate::ui_interface::change_id_shared(args[1].to_owned(), old_id);
+                    let mut res = crate::ui_interface::change_id_shared(args[1].to_owned());
                     if res.is_empty() {
                         res = "Done!".to_owned();
                     }
