@@ -105,6 +105,38 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     x == 0
 }
 
+/// Build a Custom VideoProfile from OptionMessage HQ rate-control fields.
+fn build_custom_profile_from_option(
+    o: &hbb_common::message_proto::OptionMessage,
+) -> hbb_common::video_profile::VideoProfile {
+    use hbb_common::video_profile::*;
+    let mut p = VideoProfile::default();
+    p.profile_type = VideoProfileType::Custom;
+    if let Some(mode) = RateControlMode::from_proto(o.rate_control_mode) {
+        p.rate.mode = mode;
+    }
+    if o.min_bitrate_kbps > 0 {
+        p.rate.min_kbps = o.min_bitrate_kbps;
+    }
+    if o.target_bitrate_kbps > 0 {
+        p.rate.target_kbps = o.target_bitrate_kbps;
+    }
+    if o.max_bitrate_kbps > 0 {
+        p.rate.max_kbps = o.max_bitrate_kbps;
+    }
+    if o.min_fps > 0 {
+        p.rate.min_fps = o.min_fps;
+    }
+    if o.max_fps > 0 {
+        p.rate.max_fps = o.max_fps;
+    }
+    if o.custom_fps > 0 {
+        p.rate.target_fps = o.custom_fps as u32;
+    }
+    p.rate = p.rate.clamp();
+    p
+}
+
 #[cfg(target_os = "linux")]
 fn should_check_linux_headless_os_auth_before_desktop_start(
     is_headless_allowed: bool,
@@ -1080,7 +1112,7 @@ impl Connection {
                             queue_delay_ms: qos.last_queue_delay_ms(),
                             fallback_reason: qos.encoder_fallback_reason().to_owned(),
                             qos_state: qos.hq_state().as_str().to_owned(),
-                            hardware: false,
+                            hardware: qos.is_encoder_hardware(),
                             ..Default::default()
                         });
                         drop(qos);
@@ -4375,69 +4407,30 @@ impl Connection {
             || o.rate_control_mode > 0
         {
             use hbb_common::video_profile::*;
-            if let Some(pt) = VideoProfileType::from_proto(o.video_profile_type) {
-                let mut profile = if pt == VideoProfileType::Custom {
-                    let mut p = VideoProfile::default();
-                    p.profile_type = pt;
-                    if let Some(mode) = RateControlMode::from_proto(o.rate_control_mode) {
-                        p.rate.mode = mode;
-                    }
-                    if o.min_bitrate_kbps > 0 {
-                        p.rate.min_kbps = o.min_bitrate_kbps;
-                    }
-                    if o.target_bitrate_kbps > 0 {
-                        p.rate.target_kbps = o.target_bitrate_kbps;
-                    }
-                    if o.max_bitrate_kbps > 0 {
-                        p.rate.max_kbps = o.max_bitrate_kbps;
-                    }
-                    if o.min_fps > 0 {
-                        p.rate.min_fps = o.min_fps;
-                    }
-                    if o.max_fps > 0 {
-                        p.rate.max_fps = o.max_fps;
-                    }
-                    if o.custom_fps > 0 {
-                        p.rate.target_fps = o.custom_fps as u32;
-                    }
-                    p.rate = p.rate.clamp();
-                    p
+            let (width, height) = display_service::try_get_displays()
+                .ok()
+                .and_then(|ds| {
+                    ds.get(self.display_idx)
+                        .map(|d| (d.width() as u32, d.height() as u32))
+                })
+                .unwrap_or((1920, 1080));
+            let profile = if let Some(pt) = VideoProfileType::from_proto(o.video_profile_type) {
+                Some(if pt == VideoProfileType::Custom {
+                    build_custom_profile_from_option(o)
                 } else {
-                    VideoProfile::for_type(pt, 1920, 1080)
-                };
-                let _ = &mut profile;
+                    VideoProfile::for_type(pt, width, height)
+                })
+            } else if o.target_bitrate_kbps > 0 {
+                // Partial HQ fields without profile type → treat as custom
+                Some(build_custom_profile_from_option(o))
+            } else {
+                None
+            };
+            if let Some(profile) = profile {
                 video_service::VIDEO_QOS
                     .lock()
                     .unwrap()
                     .user_video_profile(self.inner.id(), profile);
-            } else if o.target_bitrate_kbps > 0 {
-                // Partial HQ fields without profile type → treat as custom
-                let mut p = VideoProfile::default();
-                p.profile_type = VideoProfileType::Custom;
-                if let Some(mode) = RateControlMode::from_proto(o.rate_control_mode) {
-                    p.rate.mode = mode;
-                }
-                if o.min_bitrate_kbps > 0 {
-                    p.rate.min_kbps = o.min_bitrate_kbps;
-                }
-                p.rate.target_kbps = o.target_bitrate_kbps;
-                if o.max_bitrate_kbps > 0 {
-                    p.rate.max_kbps = o.max_bitrate_kbps;
-                }
-                if o.min_fps > 0 {
-                    p.rate.min_fps = o.min_fps;
-                }
-                if o.max_fps > 0 {
-                    p.rate.max_fps = o.max_fps;
-                }
-                if o.custom_fps > 0 {
-                    p.rate.target_fps = o.custom_fps as u32;
-                }
-                p.rate = p.rate.clamp();
-                video_service::VIDEO_QOS
-                    .lock()
-                    .unwrap()
-                    .user_video_profile(self.inner.id(), p);
             }
         }
         if let Some(q) = o.supported_decoding.clone().take() {

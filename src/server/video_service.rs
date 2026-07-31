@@ -33,6 +33,7 @@ use crate::{
 use hbb_common::{
     anyhow::anyhow,
     config,
+    protobuf::Message as _,
     tokio::sync::{
         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         Mutex as TokioMutex,
@@ -1187,25 +1188,21 @@ fn handle_one_frame(
     {
         let mut qos = VIDEO_QOS.lock().unwrap();
         if qos.take_drop_old_frames() {
-            allow_err!(encoder.request_keyframe());
-            log::info!("HQ drop old frames: skip encode, request keyframe");
-            // Clear pending accounting
-            while qos.pending_video_bytes() > 0 {
-                qos.on_video_frame_fetched();
-            }
+            request_keyframe_best_effort(encoder);
+            // Clear pending accounting without driving the QoS state machine.
+            qos.clear_pending_frames();
             return Ok(send_conn_ids);
         }
         if let Some(rate) = qos.hq_rate_config() {
             let max_bytes = (rate.max_kbps as u64 * rate.max_queue_ms as u64 / 8) as u32;
             if max_bytes > 0 && qos.pending_video_bytes() > max_bytes {
-                allow_err!(encoder.request_keyframe());
+                let pending = qos.pending_video_bytes();
+                request_keyframe_best_effort(encoder);
                 qos.take_drop_old_frames(); // clear flag if set
-                while qos.pending_video_bytes() > 0 {
-                    qos.on_video_frame_fetched();
-                }
+                qos.clear_pending_frames();
                 log::info!(
                     "HQ queue over byte limit ({} > {}), skip encode",
-                    qos.pending_video_bytes(),
+                    pending,
                     max_bytes
                 );
                 return Ok(send_conn_ids);
@@ -1219,8 +1216,8 @@ fn handle_one_frame(
             vf.display = display as _;
             let mut msg = Message::new();
             msg.set_video_frame(vf);
-            // Estimate frame size for queue accounting
-            let frame_bytes = msg.write_to_bytes().map(|b| b.len() as u32).unwrap_or(0);
+            // Estimate frame size for queue accounting without full serialization.
+            let frame_bytes = msg.compute_size() as u32;
             VIDEO_QOS.lock().unwrap().on_frame_enqueue(frame_bytes);
             recorder
                 .lock()
@@ -1373,6 +1370,18 @@ pub fn make_display_changed_msg(
     Some(msg_out)
 }
 
+fn request_keyframe_best_effort(encoder: &mut Encoder) {
+    let supports = encoder.capability().supports_force_keyframe;
+    allow_err!(encoder.request_keyframe());
+    if supports {
+        log::info!("HQ drop old frames: skip encode, requested keyframe");
+    } else {
+        log::debug!(
+            "HQ drop old frames: skip encode; encoder cannot force IDR, relying on periodic GOP refresh"
+        );
+    }
+}
+
 fn check_qos(
     encoder: &mut Encoder,
     ratio: &mut f32,
@@ -1384,14 +1393,26 @@ fn check_qos(
 ) -> ResultType<()> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     *spf = video_qos.spf();
+    video_qos.set_encoder_hardware(encoder.is_hardware());
     if video_qos.take_need_keyframe() {
+        let supports = encoder.capability().supports_force_keyframe;
         allow_err!(encoder.request_keyframe());
-        log::info!("HQ QoS requested keyframe");
+        if supports {
+            log::info!("HQ QoS requested keyframe");
+        } else {
+            log::debug!(
+                "HQ QoS keyframe requested but encoder cannot force IDR; relying on periodic GOP refresh"
+            );
+        }
     }
     if *ratio != video_qos.ratio() {
         *ratio = video_qos.ratio();
         if encoder.support_changing_quality() {
-            if let Some(rate) = video_qos.hq_rate_config().cloned() {
+            // Apply the live ABR bitrate (hq_current_kbps), not the static profile target.
+            if let Some(mut rate) = video_qos.hq_rate_config().cloned() {
+                rate.target_kbps = video_qos
+                    .current_kbps()
+                    .clamp(rate.min_kbps, rate.max_kbps);
                 allow_err!(encoder.set_rate_control(&rate));
             } else {
                 allow_err!(encoder.set_quality(*ratio));
