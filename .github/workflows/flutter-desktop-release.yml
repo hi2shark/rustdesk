@@ -1,0 +1,23 @@
+name: Flutter Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Prerelease tag (e.g. v1.4.8 or 1.4.8)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-[0-9]+"
+
+jobs:
+  build-desktop:
+    uses: ./.github/workflows/flutter-build-desktop.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
