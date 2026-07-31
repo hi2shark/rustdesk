@@ -171,6 +171,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Local Address", "Lokalni naslov"),
         ("Change Local Port", "Spremeni lokalna vrata"),
         ("setup_server_tip", "Za hitrejšo povezavo uporabite lasten strežnik"),
+        ("must_setup_server_tip", ""),
         ("Too short, at least 6 characters.", "Prekratek, mora biti najmanj 6 znakov."),
         ("The confirmation is not identical.", "Potrditev ni enaka."),
         ("Permissions", "Dovoljenja"),

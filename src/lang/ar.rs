@@ -171,6 +171,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Local Address", "العنوان المحلي"),
         ("Change Local Port", "تغيير المنفذ المحلي"),
         ("setup_server_tip", "لاتصال اسرع, الرجاء اعداد خادم خاص بك"),
+        ("must_setup_server_tip", ""),
         ("Too short, at least 6 characters.", "قصير جدا. يجب ان يكون على الاقل 6 خانات"),
         ("The confirmation is not identical.", "التأكيد غير متطابق"),
         ("Permissions", "الاذونات"),

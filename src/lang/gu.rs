@@ -171,6 +171,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Local Address", "લોકલ સરનામું"),
         ("Change Local Port", "લોકલ પોર્ટ બદલો"),
         ("setup_server_tip", "ઝડપી કનેક્શન માટે તમારું પોતાનું સર્વર સેટ કરો"),
+        ("must_setup_server_tip", ""),
         ("Too short, at least 6 characters.", "ખૂબ ટૂંકું, ઓછામાં ઓછા 6 અક્ષરો હોવા જોઈએ."),
         ("The confirmation is not identical.", "પુષ્ટિકરણ સરખું નથી."),
         ("Permissions", "પરવાનગીઓ"),

@@ -171,6 +171,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Local Address", "Vietinis adresas"),
         ("Change Local Port", "Keisti vietinį prievadą"),
         ("setup_server_tip", "Kad ryšys būtų greitesnis, nustatykite savo serverį"),
+        ("must_setup_server_tip", ""),
         ("Too short, at least 6 characters.", "Per trumpas, mažiausiai 6 simboliai."),
         ("The confirmation is not identical.", "Patvirtinimas nėra tapatus."),
         ("Permissions", "Leidimai"),
