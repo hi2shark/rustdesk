@@ -47,6 +47,11 @@ pub struct HwRamEncoderConfig {
     pub height: usize,
     pub quality: f32,
     pub keyframe_interval: Option<usize>,
+    /// Target FPS passed to the hardware encoder (default 30).
+    pub fps: Option<i32>,
+    /// Optional min/max bitrate in kbps for clamp.
+    pub min_bitrate_kbps: Option<u32>,
+    pub max_bitrate_kbps: Option<u32>,
 }
 
 pub struct HwRamEncoder {
@@ -55,6 +60,7 @@ pub struct HwRamEncoder {
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
     config: HwRamEncoderConfig,
+    force_keyframe: bool,
 }
 
 impl EncoderApi for HwRamEncoder {
@@ -68,7 +74,14 @@ impl EncoderApi for HwRamEncoder {
                 let mut bitrate =
                     Self::bitrate(&config.name, config.width, config.height, config.quality);
                 bitrate = Self::check_bitrate_range(&config, bitrate);
-                let gop = config.keyframe_interval.unwrap_or(DEFAULT_GOP as _) as i32;
+                let gop = config
+                    .keyframe_interval
+                    .unwrap_or_else(|| {
+                        // Low-latency default: ~3s GOP at configured FPS
+                        let fps = config.fps.unwrap_or(DEFAULT_FPS) as usize;
+                        fps.saturating_mul(3).max(30)
+                    }) as i32;
+                let fps = config.fps.unwrap_or(DEFAULT_FPS);
                 let ctx = EncodeContext {
                     name: config.name.clone(),
                     mc_name: config.mc_name.clone(),
@@ -77,7 +90,7 @@ impl EncoderApi for HwRamEncoder {
                     pixfmt: DEFAULT_PIXFMT,
                     align: HW_STRIDE_ALIGN as _,
                     kbs: bitrate as i32,
-                    fps: DEFAULT_FPS,
+                    fps,
                     gop,
                     quality: DEFAULT_HW_QUALITY,
                     rc,
@@ -100,6 +113,7 @@ impl EncoderApi for HwRamEncoder {
                         pixfmt: ctx.pixfmt,
                         bitrate,
                         config,
+                        force_keyframe: true,
                     }),
                     Err(_) => Err(anyhow!(format!("Failed to create encoder"))),
                 }
@@ -184,6 +198,79 @@ impl EncoderApi for HwRamEncoder {
         }
         self.config.quality = ratio;
         Ok(())
+    }
+
+    fn set_rate_control(
+        &mut self,
+        cfg: &hbb_common::video_profile::VideoRateConfig,
+    ) -> ResultType<()> {
+        let mut bitrate = cfg.target_kbps;
+        if let Some(min_b) = self.config.min_bitrate_kbps {
+            bitrate = bitrate.max(min_b);
+        } else {
+            bitrate = bitrate.max(cfg.min_kbps);
+        }
+        if let Some(max_b) = self.config.max_bitrate_kbps {
+            bitrate = bitrate.min(max_b);
+        } else {
+            bitrate = bitrate.min(cfg.max_kbps);
+        }
+        bitrate = Self::check_bitrate_range(&self.config, bitrate);
+        if bitrate > 0 {
+            self.encoder.set_bitrate(bitrate as _).ok();
+            self.bitrate = bitrate;
+        }
+        self.config.quality = cfg.to_legacy_ratio();
+        self.config.fps = Some(cfg.target_fps as i32);
+        self.config.min_bitrate_kbps = Some(cfg.min_kbps);
+        self.config.max_bitrate_kbps = Some(cfg.max_kbps);
+        Ok(())
+    }
+
+    fn request_keyframe(&mut self) -> ResultType<()> {
+        self.force_keyframe = true;
+        // Many hw encoders expose force IDR via set_bitrate trick or dedicated API;
+        // mark flag for encode path consumers and try set_bitrate refresh.
+        let _ = self.encoder.set_bitrate(self.bitrate as _);
+        Ok(())
+    }
+
+    fn diagnostics(&self) -> hbb_common::video_profile::EncoderDiagnostics {
+        let codec = match self.format {
+            DataFormat::H264 => "h264",
+            DataFormat::H265 => "h265",
+            _ => "unknown",
+        };
+        hbb_common::video_profile::EncoderDiagnostics {
+            actual_codec: codec.into(),
+            hardware: true,
+            chroma: "i420".into(),
+            implementation: self.config.name.clone(),
+            target_kbps: self.bitrate,
+            can_recover: true,
+            ..Default::default()
+        }
+    }
+
+    fn capability(&self) -> hbb_common::video_profile::EncoderCapability {
+        let codec = match self.format {
+            DataFormat::H264 => "h264",
+            DataFormat::H265 => "h265",
+            _ => "unknown",
+        };
+        hbb_common::video_profile::EncoderCapability {
+            codec: codec.into(),
+            implementation: self.config.name.clone(),
+            hardware: true,
+            pixel_formats: vec!["nv12".into()],
+            supports_444: false,
+            supports_dynamic_bitrate: self.support_changing_quality(),
+            supports_low_latency: true,
+            max_width: self.config.width as u32,
+            max_height: self.config.height as u32,
+            max_fps: 120,
+            ..Default::default()
+        }
     }
 
     fn bitrate(&self) -> u32 {

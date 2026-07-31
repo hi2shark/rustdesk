@@ -264,6 +264,9 @@ mod hw {
                 height,
                 quality,
                 keyframe_interval: None,
+                fps: None,
+                min_bitrate_kbps: None,
+                max_bitrate_kbps: None,
             }),
             false,
         )

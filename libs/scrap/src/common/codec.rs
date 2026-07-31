@@ -80,6 +80,38 @@ pub trait EncoderApi {
     fn is_hardware(&self) -> bool;
 
     fn disable(&self);
+
+    /// Apply advanced rate control. Default maps target_kbps to legacy ratio.
+    fn set_rate_control(
+        &mut self,
+        cfg: &hbb_common::video_profile::VideoRateConfig,
+    ) -> ResultType<()> {
+        self.set_quality(cfg.to_legacy_ratio())
+    }
+
+    /// Request the next encoded frame to be a keyframe (IDR). Default is no-op.
+    fn request_keyframe(&mut self) -> ResultType<()> {
+        Ok(())
+    }
+
+    fn diagnostics(&self) -> hbb_common::video_profile::EncoderDiagnostics {
+        hbb_common::video_profile::EncoderDiagnostics {
+            actual_codec: String::new(),
+            hardware: self.is_hardware(),
+            target_kbps: self.bitrate(),
+            ..Default::default()
+        }
+    }
+
+    fn capability(&self) -> hbb_common::video_profile::EncoderCapability {
+        hbb_common::video_profile::EncoderCapability {
+            hardware: self.is_hardware(),
+            supports_dynamic_bitrate: self.support_changing_quality(),
+            supports_low_latency: self.latency_free(),
+            max_fps: 120,
+            ..Default::default()
+        }
+    }
 }
 
 pub struct Encoder {

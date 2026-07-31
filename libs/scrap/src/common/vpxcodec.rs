@@ -39,6 +39,8 @@ pub struct VpxEncoder {
     id: VpxVideoCodecId,
     i444: bool,
     yuvfmt: EncodeYuvFormat,
+    force_keyframe: bool,
+    cpu_used: i32,
 }
 
 pub struct VpxDecoder {
@@ -165,6 +167,12 @@ impl EncoderApi for VpxEncoder {
                     id: config.codec,
                     i444,
                     yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
+                    force_keyframe: true,
+                    cpu_used: if config.codec == VpxVideoCodecId::VP9 {
+                        7
+                    } else {
+                        12
+                    },
                 })
             }
             _ => Err(anyhow!("encoder type mismatch")),
@@ -210,6 +218,82 @@ impl EncoderApi for VpxEncoder {
         Ok(())
     }
 
+    fn set_rate_control(
+        &mut self,
+        cfg: &hbb_common::video_profile::VideoRateConfig,
+    ) -> ResultType<()> {
+        let mut c = unsafe { *self.ctx.config.enc.to_owned() };
+        c.rc_target_bitrate = cfg.target_kbps;
+        // Slightly tighter quantizer for office/stable quality modes.
+        let ratio = cfg.to_legacy_ratio();
+        let (q_min, q_max) = Self::calc_q_values(ratio);
+        c.rc_min_quantizer = q_min;
+        c.rc_max_quantizer = q_max;
+        call_vpx!(vpx_codec_enc_config_set(&mut self.ctx, &c));
+        // Office-clear prefers lower CPU used (better quality); motion prefers higher.
+        let cpu = if cfg.mode == hbb_common::video_profile::RateControlMode::StableQuality {
+            5
+        } else if cfg.target_fps >= 50 {
+            8
+        } else {
+            7
+        };
+        if self.id == VpxVideoCodecId::VP9 && cpu != self.cpu_used {
+            call_vpx!(vpx_codec_control_(
+                &mut self.ctx,
+                VP8E_SET_CPUUSED as _,
+                cpu as c_int
+            ));
+            self.cpu_used = cpu;
+        }
+        Ok(())
+    }
+
+    fn request_keyframe(&mut self) -> ResultType<()> {
+        self.force_keyframe = true;
+        Ok(())
+    }
+
+    fn diagnostics(&self) -> hbb_common::video_profile::EncoderDiagnostics {
+        hbb_common::video_profile::EncoderDiagnostics {
+            actual_codec: if self.id == VpxVideoCodecId::VP9 {
+                "vp9".into()
+            } else {
+                "vp8".into()
+            },
+            hardware: false,
+            chroma: if self.i444 { "i444".into() } else { "i420".into() },
+            implementation: "libvpx".into(),
+            target_kbps: self.bitrate(),
+            can_recover: true,
+            ..Default::default()
+        }
+    }
+
+    fn capability(&self) -> hbb_common::video_profile::EncoderCapability {
+        hbb_common::video_profile::EncoderCapability {
+            codec: if self.id == VpxVideoCodecId::VP9 {
+                "vp9".into()
+            } else {
+                "vp8".into()
+            },
+            implementation: "libvpx".into(),
+            hardware: false,
+            pixel_formats: if self.i444 {
+                vec!["i444".into()]
+            } else {
+                vec!["i420".into()]
+            },
+            supports_444: self.id == VpxVideoCodecId::VP9,
+            supports_dynamic_bitrate: true,
+            supports_low_latency: true,
+            max_width: self.width as u32,
+            max_height: self.height as u32,
+            max_fps: 120,
+            ..Default::default()
+        }
+    }
+
     fn bitrate(&self) -> u32 {
         let c = unsafe { *self.ctx.config.enc.to_owned() };
         c.rc_target_bitrate
@@ -252,12 +336,19 @@ impl VpxEncoder {
             data.as_ptr() as _,
         ));
 
+        // VPX_EFLAG_FORCE_KF == 1 << 0
+        let flags = if self.force_keyframe {
+            self.force_keyframe = false;
+            1i64
+        } else {
+            0i64
+        };
         call_vpx!(vpx_codec_encode(
             &mut self.ctx,
             &image,
             pts as _,
             1, // Duration
-            0, // Flags
+            flags as _, // Flags
             VPX_DL_REALTIME as _,
         ));
 

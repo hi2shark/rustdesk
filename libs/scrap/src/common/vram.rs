@@ -185,6 +185,46 @@ impl EncoderApi for VRamEncoder {
         Ok(())
     }
 
+    fn set_rate_control(
+        &mut self,
+        cfg: &hbb_common::video_profile::VideoRateConfig,
+    ) -> ResultType<()> {
+        let bitrate = cfg.target_kbps.clamp(cfg.min_kbps, cfg.max_kbps);
+        if bitrate > 0 {
+            if self.encoder.set_bitrate(bitrate as _).is_ok() {
+                self.bitrate = bitrate;
+            }
+        }
+        self.ctx.d.framerate = cfg.target_fps as i32;
+        // Low-latency GOP ~3 seconds
+        self.ctx.d.gop = (cfg.target_fps * 3).max(30) as i32;
+        Ok(())
+    }
+
+    fn request_keyframe(&mut self) -> ResultType<()> {
+        // Refresh bitrate to nudge some encoders toward IDR; full force-IDR
+        // depends on vendor API availability in hwcodec crate.
+        let _ = self.encoder.set_bitrate(self.bitrate as _);
+        Ok(())
+    }
+
+    fn diagnostics(&self) -> hbb_common::video_profile::EncoderDiagnostics {
+        let codec = match self.format {
+            DataFormat::H264 => "h264",
+            DataFormat::H265 => "h265",
+            _ => "unknown",
+        };
+        hbb_common::video_profile::EncoderDiagnostics {
+            actual_codec: codec.into(),
+            hardware: true,
+            chroma: "i420".into(),
+            implementation: "vram".into(),
+            target_kbps: self.bitrate,
+            can_recover: true,
+            ..Default::default()
+        }
+    }
+
     fn bitrate(&self) -> u32 {
         self.bitrate
     }
