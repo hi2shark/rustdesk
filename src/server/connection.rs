@@ -1105,17 +1105,18 @@ impl Connection {
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
                         conn.last_test_delay = Some(Instant::now());
                         let mut msg_out = Message::new();
-                        let qos = video_service::VIDEO_QOS.lock().unwrap();
-                        msg_out.set_test_delay(TestDelay{
-                            last_delay: conn.network_delay,
-                            target_bitrate: qos.bitrate(),
-                            queue_delay_ms: qos.last_queue_delay_ms(),
-                            fallback_reason: qos.encoder_fallback_reason().to_owned(),
-                            qos_state: qos.hq_state().as_str().to_owned(),
-                            hardware: qos.is_encoder_hardware(),
-                            ..Default::default()
-                        });
-                        drop(qos);
+                        {
+                            let qos = video_service::VIDEO_QOS.lock().unwrap();
+                            msg_out.set_test_delay(TestDelay{
+                                last_delay: conn.network_delay,
+                                target_bitrate: qos.bitrate(),
+                                queue_delay_ms: qos.last_queue_delay_ms(),
+                                fallback_reason: qos.encoder_fallback_reason().to_owned(),
+                                qos_state: qos.hq_state().as_str().to_owned(),
+                                hardware: qos.is_encoder_hardware(),
+                                ..Default::default()
+                            });
+                        }
                         conn.send(msg_out.into()).await;
                     }
                     if conn.is_authed_remote_conn() || conn.view_camera {
