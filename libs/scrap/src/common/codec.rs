@@ -226,6 +226,8 @@ impl Encoder {
         let av1_useable = decodings.len() > 0
             && decodings.iter().all(|(_, s)| s.ability_av1 > 0)
             && !disable_av1();
+        let vp9_i444_useable = decodings.len() > 0 && decodings.iter().all(|(_, s)| s.i444.vp9);
+        let av1_i444_useable = av1_useable && decodings.iter().all(|(_, s)| s.i444.av1);
         let _all_support_h264_decoding =
             decodings.len() > 0 && decodings.iter().all(|(_, s)| s.ability_h264 > 0);
         let _all_support_h265_decoding =
@@ -283,6 +285,12 @@ impl Encoder {
             av1: av1_useable,
             h264: h264_useable,
             h265: h265_useable,
+            i444: Some(CodecAbility {
+                vp9: vp9_i444_useable,
+                av1: av1_i444_useable,
+                ..Default::default()
+            })
+            .into(),
             ..Default::default()
         });
         // find the most frequent preference

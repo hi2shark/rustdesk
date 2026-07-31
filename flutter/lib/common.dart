@@ -29,6 +29,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:window_size/window_size.dart' as window_size;
 
 import '../consts.dart';
+import 'common/server_connection_guard.dart';
 import 'common/widgets/overlay.dart';
 import 'mobile/pages/file_manager_page.dart';
 import 'mobile/pages/remote_page.dart';
@@ -2536,6 +2537,15 @@ connectMainDesktop(String id,
 /// If [isViewCamera], starts a session only for view camera.
 /// If [isTcpTunneling], starts a session only for tcp tunneling.
 /// If [isRDP], starts a session only for rdp.
+List<Widget> missingServerDialogActions(
+    VoidCallback close, VoidCallback openServerSettings) {
+  return [
+    dialogButton('Cancel', onPressed: close, isOutline: true),
+    dialogButton('OK',
+        onPressed: () => confirmMissingServer(close, openServerSettings)),
+  ];
+}
+
 connect(BuildContext context, String id,
     {bool isFileTransfer = false,
     bool isViewCamera = false,
@@ -2548,18 +2558,16 @@ connect(BuildContext context, String id,
     bool? isSharedPassword}) async {
   if (id == '') return;
   // Block outgoing connect until a self-hosted ID/Relay Server is configured.
-  if (await bind.mainIsUsingPublicServer()) {
+  if (shouldBlockOutgoingConnectionForServer(
+      await bind.mainIsUsingPublicServer())) {
     gFFI.dialogManager.show((setState, close, ctx) {
       return CustomAlertDialog(
         title: Text(translate('ID/Relay Server')),
         content: Text(translate('must_setup_server_tip')),
-        actions: [
-          dialogButton('Cancel', onPressed: close, isOutline: true),
-          dialogButton('OK', onPressed: () {
-            close();
-            showServerSettings(gFFI.dialogManager, null);
-          }),
-        ],
+        actions: missingServerDialogActions(
+            close,
+            () => showServerSettings(
+                gFFI.dialogManager, (callback) => callback())),
         onCancel: close,
       );
     });
@@ -3960,7 +3968,7 @@ get defaultOptionAccessMode => isCustomClient ? 'custom' : '';
 get defaultOptionApproveMode => isCustomClient ? 'password-click' : '';
 
 bool whitelistNotEmpty() {
-  // https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/#whitelist
+  // Self-hosted server whitelist option.
   final v = bind.mainGetOptionSync(key: kOptionWhitelist);
   return v != '' && v != ',';
 }

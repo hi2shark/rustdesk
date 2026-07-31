@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter_hbb/common/hq_quality_diagnostics.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
@@ -3501,19 +3502,6 @@ class CursorModel with ChangeNotifier {
   }
 }
 
-class QualityMonitorData {
-  String? speed;
-  String? fps;
-  String? delay;
-  String? targetBitrate;
-  String? codecFormat;
-  String? chroma;
-  String? queueDelay;
-  String? fallbackReason;
-  String? qosState;
-  String? hardware;
-}
-
 class QualityMonitorModel with ChangeNotifier {
   WeakReference<FFI> parent;
 
@@ -3563,10 +3551,6 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('delay') && (evt['delay'] as String).isNotEmpty) {
         _data.delay = evt['delay'];
       }
-      if (evt.containsKey('target_bitrate') &&
-          (evt['target_bitrate'] as String).isNotEmpty) {
-        _data.targetBitrate = evt['target_bitrate'];
-      }
       if (evt.containsKey('codec_format') &&
           (evt['codec_format'] as String).isNotEmpty) {
         _data.codecFormat = evt['codec_format'];
@@ -3574,22 +3558,7 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('chroma') && (evt['chroma'] as String).isNotEmpty) {
         _data.chroma = evt['chroma'];
       }
-      if (evt.containsKey('queue_delay') &&
-          (evt['queue_delay'] as String).isNotEmpty) {
-        _data.queueDelay = evt['queue_delay'];
-      }
-      if (evt.containsKey('fallback_reason') &&
-          (evt['fallback_reason'] as String).isNotEmpty) {
-        _data.fallbackReason = evt['fallback_reason'];
-      }
-      if (evt.containsKey('qos_state') &&
-          (evt['qos_state'] as String).isNotEmpty) {
-        _data.qosState = evt['qos_state'];
-      }
-      if (evt.containsKey('hardware') &&
-          (evt['hardware'] as String).isNotEmpty) {
-        _data.hardware = evt['hardware'];
-      }
+      _data.updateHqDiagnostics(evt);
       notifyListeners();
     } catch (e) {
       //

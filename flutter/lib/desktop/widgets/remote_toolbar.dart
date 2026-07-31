@@ -3,6 +3,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/hq_video_profile.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
@@ -1764,27 +1765,38 @@ class _DisplayMenuState extends State<_DisplayMenu> {
   }
 
   hqVideoProfile() {
+    Future<void> sendHqOption(String name, String value) =>
+        bind.sessionPeerOption(
+            sessionId: ffi.sessionId, name: name, value: value);
+
     Future<void> applyProfile(String profile) async {
-      await bind.sessionPeerOption(
-          sessionId: ffi.sessionId,
-          name: kOptionVideoProfile,
-          value: profile);
-      await bind.sessionPeerOption(
-          sessionId: ffi.sessionId,
-          name: kOptionEnableHqVideo,
-          value: 'Y');
+      await applyHqProfileSelection(sendHqOption, profile);
     }
 
     return futureBuilder(
-        future: bind.sessionGetPeerOption(
-            sessionId: ffi.sessionId, name: kOptionVideoProfile),
+        future: Future.wait<String>([
+          Future<String>.value(bind.sessionGetPeerOption(
+              sessionId: ffi.sessionId, name: kOptionVideoProfile)),
+          Future<String>.value(bind.sessionGetPeerOption(
+              sessionId: ffi.sessionId, name: kOptionEnableHqVideo)),
+        ]),
         hasData: (data) {
+          final values = data as List<String>;
           final groupValue =
-              (data as String).isEmpty ? kVideoProfileCustom : data;
+              values[0].isEmpty ? kVideoProfileCustom : values[0];
+          final enabled = values[1] == 'Y';
           return _SubmenuButton(
             ffi: widget.ffi,
             child: Text(translate('HQ Video Profile')),
             menuChildren: [
+              CkbMenuButton(
+                value: enabled,
+                onChanged: (value) =>
+                    setHqSessionEnabled(sendHqOption, value == true),
+                child: Text(translate('Enable HQ video engine')),
+                ffi: ffi,
+              ),
+              Divider(),
               RdoMenuButton<String>(
                 value: kVideoProfileOfficeClear,
                 groupValue: groupValue,
@@ -3658,7 +3670,7 @@ class _HqStatusLabel extends StatelessWidget {
               ? '${(int.tryParse(d.targetBitrate!) ?? 0) ~/ 1000} Mbps'
               : null;
           final queue =
-              d.queueDelay != null ? 'Queue ${d.queueDelay} ms' : null;
+              d.queueDelay != null ? '${translate('Queue')} ${d.queueDelay} ms' : null;
           final parts = <String>[
             '$codec$hw',
             if (bitrate != null) bitrate,

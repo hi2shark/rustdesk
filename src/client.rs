@@ -131,6 +131,10 @@ pub const SCRAP_XDP_PORTAL_UNAVAILABLE: &str =
 pub const SCRAP_X11_REQUIRED: &str = "x11 expected";
 pub const SCRAP_X11_REF_URL: &str = "";
 
+fn self_hosted_rendezvous_available(using_public: bool, server: &str) -> bool {
+    !using_public && !server.trim().is_empty() && !crate::is_public(server)
+}
+
 #[cfg(not(target_os = "linux"))]
 pub const AUDIO_BUFFER_MS: usize = 3000;
 
@@ -302,7 +306,7 @@ impl Client {
         } else {
             (check_port(other_server, RENDEZVOUS_PORT), Vec::new(), true)
         };
-        if rendezvous_server.is_empty() {
+        if !self_hosted_rendezvous_available(false, &rendezvous_server) {
             bail!("must_setup_server_tip");
         }
 
@@ -2306,13 +2310,9 @@ impl LoginConfigHandler {
         if self.is_hq_video_enabled() {
             let (w, h) = self.peer_display_size();
             let profile = self.get_video_profile(w, h);
-            msg.video_profile_type = profile.profile_type.to_proto();
-            msg.rate_control_mode = profile.rate.mode.to_proto();
-            msg.min_bitrate_kbps = profile.rate.min_kbps;
-            msg.target_bitrate_kbps = profile.rate.target_kbps;
-            msg.max_bitrate_kbps = profile.rate.max_kbps;
-            msg.min_fps = profile.rate.min_fps;
-            msg.max_fps = profile.rate.max_fps;
+            self.apply_video_profile_to_option_message(&profile, &mut msg);
+        } else {
+            msg.enable_hq_video = BoolOption::No.into();
         }
         Some(msg)
     }
@@ -2525,7 +2525,10 @@ impl LoginConfigHandler {
         let profile_type =
             VideoProfileType::from_str_or_default(&self.option_or_default(keys::OPTION_VIDEO_PROFILE));
         if profile_type != VideoProfileType::Custom {
-            return VideoProfile::for_type(profile_type, width, height);
+            let mut p = VideoProfile::for_type(profile_type, width, height);
+            p.allow_codec_fallback =
+                self.option_or_default(keys::OPTION_ALLOW_CODEC_FALLBACK) != "N";
+            return p;
         }
         let mut p = VideoProfile::default();
         p.profile_type = VideoProfileType::Custom;
@@ -2651,18 +2654,23 @@ impl LoginConfigHandler {
             p.rate.target_fps = target_fps;
             p.rate.max_queue_ms = max_queue_ms;
             p.chroma = ChromaPreference::from_str_or_default(chroma);
+            p.preferred_codec = CodecPreference::from_str_or_default(
+                &self.option_or_default(keys::OPTION_CODEC_PREFERENCE),
+            );
             p.allow_codec_fallback = allow_codec_fallback;
             p.rate = p.rate.clamp();
             p
         } else {
-            VideoProfile::for_type(pt, w, h)
+            let mut p = VideoProfile::for_type(pt, w, h);
+            p.allow_codec_fallback = allow_codec_fallback;
+            p
         };
         config.image_quality = profile.to_legacy_image_quality().to_owned();
         if config.image_quality == "custom" {
             config.custom_image_quality = vec![profile.to_legacy_custom_quality_percent()];
         }
         self.save_config(config);
-        *self.custom_fps.lock().unwrap() = Some(target_fps as _);
+        *self.custom_fps.lock().unwrap() = Some(profile.rate.target_fps as _);
 
         let mut misc = Misc::new();
         misc.set_option(self.build_video_profile_option_message(&profile));
@@ -2683,7 +2691,18 @@ impl LoginConfigHandler {
             msg.custom_image_quality = profile.to_legacy_custom_quality_percent() << 8;
             msg.custom_fps = profile.rate.target_fps as i32;
         }
+        msg.supported_decoding = MessageField::some(self.get_supported_decoding());
+        self.apply_video_profile_to_option_message(profile, &mut msg);
+        msg
+    }
+
+    fn apply_video_profile_to_option_message(
+        &self,
+        profile: &hbb_common::video_profile::VideoProfile,
+        msg: &mut OptionMessage,
+    ) {
         // New HQ fields
+        msg.enable_hq_video = BoolOption::Yes.into();
         msg.video_profile_type = profile.profile_type.to_proto();
         msg.rate_control_mode = profile.rate.mode.to_proto();
         msg.min_bitrate_kbps = profile.rate.min_kbps;
@@ -2692,7 +2711,25 @@ impl LoginConfigHandler {
         msg.min_fps = profile.rate.min_fps;
         msg.max_fps = profile.rate.max_fps;
         msg.custom_fps = profile.rate.target_fps as i32;
-        msg
+        msg.max_queue_ms = profile.rate.max_queue_ms;
+        msg.allow_codec_fallback = if profile.allow_codec_fallback {
+            BoolOption::Yes
+        } else {
+            BoolOption::No
+        }
+        .into();
+        msg.preferred_codec =
+            hbb_common::protobuf::EnumOrUnknown::from_i32(profile.preferred_codec.to_proto());
+        msg.chroma_preference =
+            hbb_common::protobuf::EnumOrUnknown::from_i32(profile.chroma.to_proto());
+    }
+
+    pub fn build_disable_video_profile_option_message(&self) -> OptionMessage {
+        OptionMessage {
+            enable_hq_video: BoolOption::No.into(),
+            supported_decoding: MessageField::some(self.get_supported_decoding()),
+            ..Default::default()
+        }
     }
 
     pub fn get_option(&self, k: &str) -> String {
@@ -4514,4 +4551,26 @@ async fn udp_nat_connect(
             anyhow!(err)
         })?;
     Ok((res.1, Some(res.0), typ))
+}
+
+#[cfg(test)]
+mod hq_server_config_tests {
+    use super::self_hosted_rendezvous_available;
+
+    #[test]
+    fn empty_and_public_rendezvous_are_rejected_but_self_hosted_is_allowed() {
+        assert!(!self_hosted_rendezvous_available(false, ""));
+        assert!(!self_hosted_rendezvous_available(
+            true,
+            "id.example.test:21116"
+        ));
+        assert!(!self_hosted_rendezvous_available(
+            false,
+            "rustdesk.com:21116"
+        ));
+        assert!(self_hosted_rendezvous_available(
+            false,
+            "id.example.test:21116"
+        ));
+    }
 }

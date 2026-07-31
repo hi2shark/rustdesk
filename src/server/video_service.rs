@@ -94,7 +94,7 @@ pub fn notify_video_frame_fetched(display_idx: usize, conn_id: i32, frame_tm: Op
     }
     // Feed HQ QoS queue-delay estimator.
     if frame_tm.is_some() {
-        VIDEO_QOS.lock().unwrap().on_video_frame_fetched();
+        VIDEO_QOS.lock().unwrap().on_video_frame_fetched(conn_id);
     }
 }
 
@@ -120,7 +120,7 @@ pub fn notify_video_frame_fetched_by_conn_id(conn_id: i32, frame_tm: Option<Inst
         }
     }
     if frame_tm.is_some() {
-        VIDEO_QOS.lock().unwrap().on_video_frame_fetched();
+        VIDEO_QOS.lock().unwrap().on_video_frame_fetched(conn_id);
     }
 }
 
@@ -599,14 +599,36 @@ fn run(vs: VideoService) -> ResultType<()> {
         vs.source,
         display_idx,
     ) {
-        Ok(result) => result,
+        Ok(result) => {
+            VIDEO_QOS.lock().unwrap().clear_encoder_fallback_reason();
+            result
+        }
         Err(err) => {
-            let reason = format!("encoder create failed: {err:?}, fallback to VP9");
-            log::error!("{reason}");
-            VIDEO_QOS
-                .lock()
-                .unwrap()
-                .set_encoder_fallback_reason(reason);
+            let strict_owner = {
+                let qos = VIDEO_QOS.lock().unwrap();
+                qos.hq_profile_config()
+                    .filter(|profile| !profile.allow_codec_fallback)
+                    .and_then(|_| qos.hq_profile_owner())
+            };
+            if let Some(owner) = strict_owner {
+                let reason = format!(
+                    "HQ profile rejected: encoder create failed ({err:?}) and fallback is disabled"
+                );
+                log::error!("{reason}");
+                let mut qos = VIDEO_QOS.lock().unwrap();
+                qos.disable_user_video_profile(owner);
+                qos.set_user_fallback_reason(owner, reason.clone());
+                qos.set_encoder_fallback_reason(format!(
+                    "encoder create failed: {err:?}, using VP9 for the remaining session"
+                ));
+            } else {
+                let reason = format!("encoder create failed: {err:?}, fallback to VP9");
+                log::error!("{reason}");
+                VIDEO_QOS
+                    .lock()
+                    .unwrap()
+                    .set_encoder_fallback_reason(reason);
+            }
             Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
                 height: c.height as _,
@@ -986,8 +1008,12 @@ fn get_encoder_config(
     }
     #[cfg(feature = "vram")]
     Encoder::update(scrap::codec::EncodingUpdate::Check);
-    // https://www.wowza.com/community/t/the-correct-keyframe-interval-in-obs-studio/95162
-    let keyframe_interval = if record { Some(240) } else { None };
+    let hq_fps = VIDEO_QOS
+        .lock()
+        .unwrap()
+        .hq_rate_config()
+        .map(|rate| rate.target_fps);
+    let keyframe_interval = encoder_keyframe_interval(record, hq_fps);
     let negotiated_codec = Encoder::negotiated_codec();
     match negotiated_codec {
         CodecFormat::H264 | CodecFormat::H265 => {
@@ -1060,6 +1086,14 @@ fn get_encoder_config(
             codec: VpxVideoCodecId::VP9,
             keyframe_interval,
         }),
+    }
+}
+
+fn encoder_keyframe_interval(record: bool, hq_fps: Option<u32>) -> Option<usize> {
+    if record {
+        Some(240)
+    } else {
+        hq_fps.map(|fps| (fps as usize).saturating_mul(3).max(30))
     }
 }
 
@@ -1218,7 +1252,11 @@ fn handle_one_frame(
             msg.set_video_frame(vf);
             // Estimate frame size for queue accounting without full serialization.
             let frame_bytes = msg.compute_size() as u32;
-            VIDEO_QOS.lock().unwrap().on_frame_enqueue(frame_bytes);
+            let conn_ids = sp.subscriber_ids();
+            VIDEO_QOS
+                .lock()
+                .unwrap()
+                .on_frame_enqueue(frame_bytes, conn_ids);
             recorder
                 .lock()
                 .unwrap()
@@ -1520,5 +1558,18 @@ fn handle_screenshot(screenshot: Screenshot, msg: String, w: usize, h: usize, da
         .send((hbb_common::tokio::time::Instant::now(), Arc::new(msg_out)))
     {
         log::error!("Failed to send screenshot, {}", e);
+    }
+}
+
+#[cfg(test)]
+mod hq_video_service_tests {
+    use super::encoder_keyframe_interval;
+
+    #[test]
+    fn hq_hardware_path_uses_short_gop_when_force_idr_is_unavailable() {
+        assert_eq!(encoder_keyframe_interval(false, Some(60)), Some(180));
+        assert_eq!(encoder_keyframe_interval(false, Some(1)), Some(30));
+        assert_eq!(encoder_keyframe_interval(false, None), None);
+        assert_eq!(encoder_keyframe_interval(true, Some(60)), Some(240));
     }
 }

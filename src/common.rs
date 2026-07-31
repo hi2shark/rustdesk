@@ -1083,8 +1083,26 @@ fn get_api_server_(api: String, custom: String) -> String {
 
 #[inline]
 pub fn is_public(url: &str) -> bool {
-    let url = url.to_ascii_lowercase();
-    url.contains("rustdesk.com/") || url.ends_with("rustdesk.com")
+    let lower = url.trim().to_ascii_lowercase();
+    let authority = lower
+        .split_once("://")
+        .map(|(_, value)| value)
+        .unwrap_or(lower.as_str())
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    let host = if authority.starts_with('[') {
+        authority
+            .split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    host == "rustdesk.com" || host.ends_with(".rustdesk.com")
 }
 
 pub fn get_udp_punch_enabled() -> bool {
@@ -2771,6 +2789,8 @@ mod tests {
         assert!(is_public("https://RustDesk.com"));
         assert!(is_public("http://www.rustdesk.com"));
         assert!(is_public("https://api.rustdesk.com"));
+        assert!(is_public("rustdesk.com:21116"));
+        assert!(is_public("id.rustdesk.com:21116"));
 
         // Test non-public URLs
         assert!(!is_public("https://example.com"));
@@ -2779,6 +2799,15 @@ mod tests {
         assert!(!is_public("localhost"));
         assert!(!is_public("https://rustdesk.computer.com"));
         assert!(!is_public("rustdesk.comhello.com"));
+    }
+
+    #[test]
+    fn api_server_has_no_official_fallback_and_accepts_self_hosted_server() {
+        assert!(get_api_server_(String::new(), String::new()).is_empty());
+        assert_eq!(
+            get_api_server_(String::new(), "id.example.test:21116".to_owned()),
+            "http://id.example.test:21114"
+        );
     }
 
     #[test]

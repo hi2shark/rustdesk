@@ -56,6 +56,59 @@ jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
 
+  hq-quality-gate:
+    name: HQ Flutter tests and analyze
+    needs: generate-bridge
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225 # v2.12.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Install Flutter dependencies
+        working-directory: flutter
+        run: flutter pub get
+
+      - name: Run HQ Flutter tests
+        working-directory: flutter
+        run: >-
+          flutter test
+          test/hq_video_profile_test.dart
+          test/hq_quality_diagnostics_test.dart
+          test/server_connection_guard_test.dart
+
+      - name: Analyze HQ Flutter files
+        working-directory: flutter
+        run: |
+          for file in \
+            lib/common.dart \
+            lib/common/hq_video_profile.dart \
+            lib/common/hq_quality_diagnostics.dart \
+            lib/common/server_connection_guard.dart \
+            lib/common/widgets/overlay.dart \
+            lib/desktop/pages/desktop_setting_page.dart \
+            lib/desktop/widgets/remote_toolbar.dart \
+            lib/models/model.dart \
+            test/hq_video_profile_test.dart \
+            test/hq_quality_diagnostics_test.dart \
+            test/server_connection_guard_test.dart
+          do
+            flutter analyze "$file"
+          done
+
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
     strategy:

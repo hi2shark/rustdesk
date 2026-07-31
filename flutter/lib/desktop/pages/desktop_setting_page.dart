@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/hq_video_profile.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -2001,8 +2002,10 @@ class _DisplayState extends State<_Display> {
               label: 'Fixed bitrate',
               onChanged: onRateModeChanged),
           _bitrateSliders(context),
+          _fpsSliders(context),
           _hqExtraOptions(context),
         ],
+        _hqFallbackOption(),
       ],
     ]);
   }
@@ -2138,18 +2141,71 @@ class _DisplayState extends State<_Display> {
                   key: kOptionChromaPreference, value: v);
               setState(() {});
             }),
-        _Checkbox(
-          label: 'Allow codec fallback',
-          getValue: () =>
-              bind.mainGetUserDefaultOption(key: kOptionAllowCodecFallback) !=
-              'N',
-          setValue: (v) async {
-            await bind.mainSetUserDefaultOption(
-                key: kOptionAllowCodecFallback, value: v ? 'Y' : 'N');
-            setState(() {});
-          },
+      ],
+    );
+  }
+
+  Widget _fpsSliders(BuildContext context) {
+    final fps = HqFpsRange.normalized(
+      int.tryParse(bind.mainGetUserDefaultOption(key: kOptionMinFps)) ?? 5,
+      int.tryParse(bind.mainGetUserDefaultOption(key: kOptionTargetFps)) ?? 30,
+      int.tryParse(bind.mainGetUserDefaultOption(key: kOptionMaxFps)) ?? 60,
+    );
+
+    Future<void> save(HqFpsRange value) async {
+      await bind.mainSetUserDefaultOption(
+          key: kOptionMinFps, value: value.min.toString());
+      await bind.mainSetUserDefaultOption(
+          key: kOptionTargetFps, value: value.target.toString());
+      await bind.mainSetUserDefaultOption(
+          key: kOptionMaxFps, value: value.max.toString());
+      setState(() {});
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('${translate('Min FPS')}: ${fps.min}')
+            .marginOnly(left: 16, top: 4),
+        Slider(
+          value: fps.min.toDouble(),
+          min: 1,
+          max: 120,
+          divisions: 119,
+          onChanged: (v) => save(fps.withMin(v.round())),
+        ),
+        Text('${translate('Target FPS')}: ${fps.target}')
+            .marginOnly(left: 16),
+        Slider(
+          value: fps.target.toDouble(),
+          min: 1,
+          max: 120,
+          divisions: 119,
+          onChanged: (v) => save(fps.withTarget(v.round())),
+        ),
+        Text('${translate('Max FPS')}: ${fps.max}')
+            .marginOnly(left: 16),
+        Slider(
+          value: fps.max.toDouble(),
+          min: 1,
+          max: 120,
+          divisions: 119,
+          onChanged: (v) => save(fps.withMax(v.round())),
         ),
       ],
+    );
+  }
+
+  Widget _hqFallbackOption() {
+    return _Checkbox(
+      label: 'Allow codec fallback',
+      getValue: () =>
+          bind.mainGetUserDefaultOption(key: kOptionAllowCodecFallback) != 'N',
+      setValue: (v) async {
+        await bind.mainSetUserDefaultOption(
+            key: kOptionAllowCodecFallback, value: v ? 'Y' : 'N');
+        setState(() {});
+      },
     );
   }
 

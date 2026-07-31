@@ -742,6 +742,10 @@ impl InvokeUiSession for FlutterHandler {
                     "hardware",
                     &status.hardware.map_or(NULL, |it| it.to_string()),
                 ),
+                (
+                    "hq_diagnostics_updated",
+                    &status.hq_diagnostics_updated.to_string(),
+                ),
             ],
             &[],
         );
