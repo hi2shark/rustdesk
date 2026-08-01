@@ -49,12 +49,25 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   echo "VERSION=$VER" >> "$GITHUB_ENV"
 fi
 
+CARGO_VERSION_CHANGED=false
+
 if [[ -f Cargo.toml ]]; then
-  sed_inplace "0,/^version = \".*\"/s//version = \"$VER\"/" Cargo.toml
+  if [[ "$(cargo_pkg_version Cargo.toml)" != "$VER" ]]; then
+    sed_inplace "0,/^version = \".*\"/s//version = \"$VER\"/" Cargo.toml
+    CARGO_VERSION_CHANGED=true
+  fi
 fi
 
 if [[ -f libs/portable/Cargo.toml ]]; then
-  sed_inplace "0,/^version = \".*\"/s//version = \"$VER\"/" libs/portable/Cargo.toml
+  if [[ "$(cargo_pkg_version libs/portable/Cargo.toml)" != "$VER" ]]; then
+    sed_inplace "0,/^version = \".*\"/s//version = \"$VER\"/" libs/portable/Cargo.toml
+    CARGO_VERSION_CHANGED=true
+  fi
+fi
+
+# CI builds with --locked, so keep workspace package versions aligned in Cargo.lock.
+if [[ "$CARGO_VERSION_CHANGED" == true && -f Cargo.lock ]]; then
+  cargo update --workspace
 fi
 
 if [[ -f flutter/pubspec.yaml ]]; then
