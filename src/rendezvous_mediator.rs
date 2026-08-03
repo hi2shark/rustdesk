@@ -52,6 +52,9 @@ static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 static MANUAL_RESTARTED: AtomicBool = AtomicBool::new(false);
 static SENT_REGISTER_PK: AtomicBool = AtomicBool::new(false);
 pub(crate) static NEEDS_DEPLOY: AtomicBool = AtomicBool::new(false);
+static RECONNECT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const RECONNECT_BACKOFF_MIN_MS: u64 = 1_000;
+const RECONNECT_BACKOFF_MAX_MS: u64 = 60_000;
 #[cfg(target_os = "android")]
 static NOTIFIED_NEEDS_DEPLOY: AtomicBool = AtomicBool::new(false);
 // register_pk retry interval (ms) when device is awaiting deployment
@@ -151,6 +154,7 @@ impl RendezvousMediator {
         }
         scrap::codec::test_av1();
         *LAST_NOT_DEPLOYED_REGISTER.lock().await = None;
+        let mut reconnect_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
         loop {
             let timeout = Arc::new(RwLock::new(CONNECT_TIMEOUT));
             let conn_start_time = Instant::now();
@@ -167,6 +171,16 @@ impl RendezvousMediator {
                     sleep(3.).await;
                     continue;
                 }
+                let mode = hbb_common::transport::transport_mode();
+                log::info!(
+                    "rendezvous connect attempt reconnect_count={} mode={:?} udp_disabled={} use_ws={} force_relay={} fallback_reason={}",
+                    RECONNECT_COUNT.load(Ordering::SeqCst),
+                    mode,
+                    crate::is_udp_disabled(),
+                    use_ws(),
+                    hbb_common::transport::should_force_relay(),
+                    hbb_common::transport::last_fallback_reason()
+                );
                 SHOULD_EXIT.store(false, Ordering::SeqCst);
                 MANUAL_RESTARTED.store(false, Ordering::SeqCst);
                 for host in servers.clone() {
@@ -189,19 +203,39 @@ impl RendezvousMediator {
                     }));
                 }
                 join_all(futs).await;
+                if Config::get_key_confirmed() {
+                    reconnect_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
+                    RECONNECT_COUNT.store(0, Ordering::SeqCst);
+                } else {
+                    RECONNECT_COUNT.fetch_add(1, Ordering::SeqCst);
+                }
             } else {
                 server.write().unwrap().close_connections();
             }
             Config::reset_online();
             let timeout = *timeout.read().unwrap();
             if !MANUAL_RESTARTED.load(Ordering::SeqCst) {
-                let elapsed = conn_start_time.elapsed().as_millis() as u64;
-                if elapsed < timeout {
-                    sleep(((timeout - elapsed) / 1000) as _).await;
+                let strict = hbb_common::transport::transport_mode().is_strict() || use_ws();
+                if strict {
+                    log::info!(
+                        "reconnect backoff_ms={} reconnect_count={} mode={:?}",
+                        reconnect_backoff_ms,
+                        RECONNECT_COUNT.load(Ordering::SeqCst),
+                        hbb_common::transport::transport_mode()
+                    );
+                    sleep((reconnect_backoff_ms as f32) / 1000.).await;
+                    reconnect_backoff_ms =
+                        (reconnect_backoff_ms.saturating_mul(2)).min(RECONNECT_BACKOFF_MAX_MS);
+                } else {
+                    let elapsed = conn_start_time.elapsed().as_millis() as u64;
+                    if elapsed < timeout {
+                        sleep(((timeout - elapsed) / 1000) as _).await;
+                    }
                 }
             } else {
                 // https://github.com/rustdesk/rustdesk/issues/12233
                 sleep(0.033).await;
+                reconnect_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
             }
         }
     }
@@ -382,8 +416,21 @@ impl RendezvousMediator {
                         #[cfg(target_os = "android")]
                         notify_android_needs_deploy();
                     }
+                    Ok(register_pk_response::Result::NOT_SUPPORT) => {
+                        match hbb_common::transport::handle_register_not_support(&self.host) {
+                            Ok(()) => {}
+                            Err(msg) => {
+                                bail!("{msg}");
+                            }
+                        }
+                    }
                     _ => {
-                        log::error!("unknown RegisterPkResponse");
+                        log::error!(
+                            "unknown RegisterPkResponse result={:?} host={} mode={:?}",
+                            rpr.result,
+                            self.host,
+                            hbb_common::transport::transport_mode()
+                        );
                     }
                 }
                 if rpr.keep_alive > 0 {
@@ -430,7 +477,14 @@ impl RendezvousMediator {
 
     pub async fn start_tcp(server: ServerPtr, host: String) -> ResultType<()> {
         let host = check_port(&host, RENDEZVOUS_PORT);
-        log::info!("start tcp: {}", hbb_common::websocket::check_ws(&host));
+        let endpoint = hbb_common::websocket::check_ws(&host);
+        log::info!(
+            "start tcp/ws rendezvous endpoint={} mode={:?} udp_disabled={} active_transport={}",
+            endpoint,
+            hbb_common::transport::transport_mode(),
+            crate::is_udp_disabled(),
+            if use_ws() { "websocket" } else { "tcp" }
+        );
         let mut conn = connect_tcp(host.clone(), CONNECT_TIMEOUT).await?;
         let key = crate::get_key(true).await;
         crate::secure_tcp(&mut conn, &key).await?;
@@ -443,6 +497,7 @@ impl RendezvousMediator {
         let mut timer = crate::rustdesk_interval(interval(crate::TIMER_OUT));
         let mut last_register_sent: Option<Instant> = None;
         let mut last_recv_msg = Instant::now();
+        let mut last_ws_ping = Instant::now();
         // we won't support connecting to multiple rendzvous servers any more, so we can use a global variable here.
         Config::set_host_key_confirmed(&rz.host_prefix, false);
         loop {
@@ -473,6 +528,10 @@ impl RendezvousMediator {
                     // https://www.emqx.com/en/blog/mqtt-keep-alive
                     if last_recv_msg.elapsed().as_millis() as u64 > rz.keep_alive as u64 * 3 / 2 {
                         bail!("Rendezvous connection is timeout");
+                    }
+                    if conn.is_ws() && last_ws_ping.elapsed().as_millis() as i64 >= REG_INTERVAL {
+                        allow_err!(conn.send_ws_ping().await);
+                        last_ws_ping = Instant::now();
                     }
                     if (!Config::get_key_confirmed() ||
                         !Config::get_host_key_confirmed(&rz.host_prefix)) &&

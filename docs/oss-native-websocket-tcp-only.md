@@ -50,8 +50,15 @@ If the API is unavailable, builtin options still work. **WebSocket is never gate
 
 When the server rejects TCP/WS registration (`NOT_SUPPORT`):
 
-- Strict modes do **not** silently fall back to UDP
-- Set `allow-transport-fallback=Y` only if you explicitly want Auto-style recovery (logged)
+- Strict modes (`tcp-only` / `websocket-only`) do **not** silently fall back to UDP
+- Error log includes `mode`, `host`, and `fallback_reason=server_not_support_persistent_registration`
+- Set `allow-transport-fallback=Y` to allow a **session-only** switch to Auto (logged), then reconnect
+- Without that option, the client keeps retrying with exponential backoff and refuses UDP
+
+## Reconnect / keepalive
+
+- Strict / WebSocket modes use exponential reconnect backoff (1s → 60s) with `reconnect_count` in logs
+- WebSocket long-lived rendezvous answers Ping with Pong and periodically sends Ping
 
 ## Logs to check
 
@@ -59,10 +66,12 @@ When the server rejects TCP/WS registration (`NOT_SUPPORT`):
 transport mode=...
 websocket endpoint: ... -> ...
 Transport: TCP Relay / WebSocket Relay
-start rendezvous mediator of ... mode=... udp_disabled=...
+rendezvous connect attempt reconnect_count=... mode=... udp_disabled=... force_relay=... fallback_reason=...
+reconnect backoff_ms=... reconnect_count=...
 ```
 
 ## Known limits
 
 - Domain `check_ws` still maps to `/ws/id` and `/ws/relay` unless overrides are set — put a reverse proxy in front, or use IP:`21118`/`21119`.
 - Full desktop `cargo check` may require VCPKG (opus); `hbb_common` unit tests cover transport parsing.
+- Mobile and Desktop both expose transport-mode; legacy Use WebSocket remains and syncs with the mode.

@@ -733,6 +733,54 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   showDeployDialog();
                 }),
           if (!disabledSettings && !_hideNetwork && !_hideWebSocket)
+            _getPopupDialogRadioEntry(
+              title: 'transport-mode',
+              list: [
+                _RadioEntry('transport-mode-auto', 'auto'),
+                _RadioEntry('transport-mode-tcp-only', 'tcp-only'),
+                _RadioEntry('transport-mode-websocket-only', 'websocket-only'),
+              ],
+              getter: () {
+                final m = bind.mainGetOptionSync(key: kOptionTransportMode);
+                if (m == 'tcp-only' || m == 'websocket-only') {
+                  return m;
+                }
+                if (mainGetBoolOptionSync(kOptionAllowWebSocket)) {
+                  return 'websocket-only';
+                }
+                if (bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y') {
+                  return 'tcp-only';
+                }
+                return 'auto';
+              },
+              asyncSetter: isOptionFixed(kOptionTransportMode)
+                  ? null
+                  : (value) async {
+                      await bind.mainSetOption(
+                          key: kOptionTransportMode, value: value);
+                      if (value == 'websocket-only') {
+                        await mainSetBoolOption(kOptionAllowWebSocket, true);
+                        await bind.mainSetOption(
+                            key: kOptionDisableUdp, value: 'Y');
+                      } else if (value == 'tcp-only') {
+                        await mainSetBoolOption(kOptionAllowWebSocket, false);
+                        await bind.mainSetOption(
+                            key: kOptionDisableUdp, value: 'Y');
+                      } else {
+                        await mainSetBoolOption(kOptionAllowWebSocket, false);
+                        await bind.mainSetOption(
+                            key: kOptionDisableUdp, value: 'N');
+                      }
+                      setState(() {
+                        _allowWebSocket =
+                            mainGetBoolOptionSync(kOptionAllowWebSocket);
+                        _disableUdp =
+                            bind.mainGetOptionSync(key: kOptionDisableUdp) ==
+                                'Y';
+                      });
+                    },
+            ),
+          if (!disabledSettings && !_hideNetwork && !_hideWebSocket)
             SettingsTile.switchTile(
               title: Text(translate('Use WebSocket')),
               initialValue: _allowWebSocket,
@@ -740,10 +788,26 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   ? null
                   : (v) async {
                       await mainSetBoolOption(kOptionAllowWebSocket, v);
+                      if (v) {
+                        await bind.mainSetOption(
+                            key: kOptionTransportMode, value: 'websocket-only');
+                        await bind.mainSetOption(
+                            key: kOptionDisableUdp, value: 'Y');
+                      } else {
+                        final disableUdp =
+                            bind.mainGetOptionSync(key: kOptionDisableUdp) ==
+                                'Y';
+                        await bind.mainSetOption(
+                            key: kOptionTransportMode,
+                            value: disableUdp ? 'tcp-only' : 'auto');
+                      }
                       final newValue =
                           await mainGetBoolOption(kOptionAllowWebSocket);
                       setState(() {
                         _allowWebSocket = newValue;
+                        _disableUdp =
+                            bind.mainGetOptionSync(key: kOptionDisableUdp) ==
+                                'Y';
                       });
                     },
             ),
