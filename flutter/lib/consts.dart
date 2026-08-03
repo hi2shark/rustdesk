@@ -180,6 +180,10 @@ const String kOptionEnableShowTerminalExtraKeys = "enable-show-terminal-extra-ke
 
 // network options
 const String kOptionAllowWebSocket = "allow-websocket";
+const String kOptionTransportMode = "transport-mode";
+const String kOptionWebsocketIdServer = "websocket-id-server";
+const String kOptionWebsocketRelayServer = "websocket-relay-server";
+const String kOptionNativeWebsocket = "native-websocket";
 const String kOptionAllowInsecureTLSFallback = "allow-insecure-tls-fallback";
 const String kOptionDisableUdp = "disable-udp";
 const String kOptionEnableFlutterHttpOnRust = "enable-flutter-http-on-rust";
