@@ -2318,7 +2318,7 @@ pub fn verify_login(_raw: &str, _id: &str) -> bool {
 
 #[inline]
 pub fn is_udp_disabled() -> bool {
-    Config::get_option(keys::OPTION_DISABLE_UDP) == "Y"
+    hbb_common::transport::should_disable_udp()
 }
 
 // this crate https://github.com/yoshd/stun-client supports nat type
