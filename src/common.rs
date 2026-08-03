@@ -1058,7 +1058,7 @@ pub fn get_api_server(api: String, custom: String) -> String {
     res
 }
 
-fn get_api_server_(api: String, custom: String) -> String {
+fn get_api_server_(api: String, _custom: String) -> String {
     #[cfg(windows)]
     if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
         if !lic.api.is_empty() {
@@ -1068,16 +1068,7 @@ fn get_api_server_(api: String, custom: String) -> String {
     if !api.is_empty() {
         return api.to_owned();
     }
-    let s0 = get_custom_rendezvous_server(custom);
-    if !s0.is_empty() {
-        let s = crate::increase_port(&s0, -2);
-        if s == s0 {
-            return format!("http://{}:{}", s, config::RENDEZVOUS_PORT - 2);
-        } else {
-            return format!("http://{}", s);
-        }
-    }
-    // No official admin.rustdesk.com fallback — require self-hosted api/id server.
+    // Do not derive :21114 from ID server; only use an explicitly configured api-server.
     "".to_owned()
 }
 
@@ -2804,9 +2795,14 @@ mod tests {
     #[test]
     fn api_server_has_no_official_fallback_and_accepts_self_hosted_server() {
         assert!(get_api_server_(String::new(), String::new()).is_empty());
+        // Empty api-server must not be derived from ID server (:21114).
+        assert!(get_api_server_(String::new(), "id.example.test:21116".to_owned()).is_empty());
         assert_eq!(
-            get_api_server_(String::new(), "id.example.test:21116".to_owned()),
-            "http://id.example.test:21114"
+            get_api_server_(
+                "http://api.example.test:21114".to_owned(),
+                "id.example.test:21116".to_owned()
+            ),
+            "http://api.example.test:21114"
         );
     }
 
