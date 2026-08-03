@@ -564,7 +564,7 @@ impl Client {
                         connect_futures.push(
                             async move {
                                 let conn = fut.await?;
-                                Ok((conn, None, if use_ws() { "WebSocket" } else { "Relay" }))
+                                Ok((conn, None, if use_ws() { "WebSocket Relay" } else { "TCP Relay" }))
                             }
                             .boxed(),
                         );
@@ -733,7 +733,11 @@ impl Client {
                     interface.update_direct(Some(false));
                     bail!("Failed to connect via relay server: {}", e);
                 }
-                typ = "Relay";
+                typ = if use_ws() {
+                    "WebSocket Relay"
+                } else {
+                    "TCP Relay"
+                };
                 direct = false;
             } else {
                 bail!("Failed to make direct connection to remote desktop");
@@ -1859,8 +1863,15 @@ impl LoginConfigHandler {
         self.force_relay =
             config::option2bool("force-always-relay", &self.get_option("force-always-relay"))
                 || force_relay
+                || hbb_common::transport::should_force_relay()
                 || use_ws()
                 || Config::is_proxy();
+        log::info!(
+            "transport mode={:?} force_relay={} use_ws={}",
+            hbb_common::transport::transport_mode(),
+            self.force_relay,
+            use_ws()
+        );
         if let Some((real_id, server, key)) = &self.other_server {
             let other_server_key = self.get_option("other-server-key");
             if !other_server_key.is_empty() && key.is_empty() {

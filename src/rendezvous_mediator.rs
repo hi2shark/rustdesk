@@ -121,6 +121,7 @@ impl RendezvousMediator {
             }
         }
         crate::hbbs_http::sync::start();
+        crate::hbbs_http::capability::try_refresh_capabilities();
         #[cfg(target_os = "windows")]
         if crate::platform::is_installed() && crate::is_server() {
             crate::updater::start_auto_update();
@@ -486,7 +487,13 @@ impl RendezvousMediator {
     }
 
     pub async fn start(server: ServerPtr, host: String) -> ResultType<()> {
-        log::info!("start rendezvous mediator of {}", host);
+        log::info!(
+            "start rendezvous mediator of {} mode={:?} udp_disabled={} use_ws={}",
+            host,
+            hbb_common::transport::transport_mode(),
+            crate::is_udp_disabled(),
+            use_ws()
+        );
         //If the investment agent type is http or https, then tcp forwarding is enabled.
         if (cfg!(debug_assertions) && option_env!("TEST_TCP").is_some())
             || Config::is_proxy()
@@ -663,7 +670,10 @@ impl RendezvousMediator {
             return Ok(());
         }
         let peer_addr_v6 = hbb_common::AddrMangle::decode(&ph.socket_addr_v6);
-        let relay = use_ws() || Config::is_proxy() || ph.force_relay;
+        let relay = use_ws()
+            || Config::is_proxy()
+            || ph.force_relay
+            || hbb_common::transport::should_force_relay();
         let mut socket_addr_v6 = Default::default();
         let meta = connection_meta(
             ph.control_permissions.into_option(),
@@ -674,7 +684,7 @@ impl RendezvousMediator {
                 start_ipv6(peer_addr_v6, peer_addr, server.clone(), meta.clone()).await;
         }
         let relay_server = self.get_relay_server(ph.relay_server);
-        // for ensure, websocket go relay directly
+        // for ensure, websocket / tcp-only go relay directly
         if ph.nat_type.enum_value() == Ok(NatType::SYMMETRIC)
             || Config::get_nat_type() == NatType::SYMMETRIC as i32
             || relay
