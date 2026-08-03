@@ -1726,11 +1726,76 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                 ),
               if (!hideWebSocket && (!hideServer || !hideProxy)) divider,
               if (!hideWebSocket)
-                switchWidget(
-                    Icons.web_asset_outlined,
-                    'Use WebSocket',
-                    '${translate('websocket_tip')}\n\n${translate('server-oss-not-support-tip')}',
-                    kOptionAllowWebSocket),
+                Column(
+                  children: [
+                    listTile(
+                      icon: Icons.swap_horiz,
+                      title: 'transport-mode',
+                      showTooltip: true,
+                      tooltipMessage:
+                          '${translate('transport-mode-tip')}\n\n${translate('server-oss-not-support-tip')}',
+                      trailing: DropdownButton<String>(
+                        value: () {
+                          final m = bind.mainGetOptionSync(
+                              key: kOptionTransportMode);
+                          if (m == 'tcp-only' || m == 'websocket-only') {
+                            return m;
+                          }
+                          if (bind.mainGetOptionSync(
+                                  key: kOptionAllowWebSocket) ==
+                              'Y') {
+                            return 'websocket-only';
+                          }
+                          if (bind.mainGetOptionSync(key: kOptionDisableUdp) ==
+                              'Y') {
+                            return 'tcp-only';
+                          }
+                          return 'auto';
+                        }(),
+                        underline: const SizedBox.shrink(),
+                        onChanged: locked || isOptionFixed(kOptionTransportMode)
+                            ? null
+                            : (value) async {
+                                if (value == null) return;
+                                await bind.mainSetOption(
+                                    key: kOptionTransportMode, value: value);
+                                // Keep legacy options in sync for older paths.
+                                if (value == 'websocket-only') {
+                                  await bind.mainSetOption(
+                                      key: kOptionAllowWebSocket, value: 'Y');
+                                  await bind.mainSetOption(
+                                      key: kOptionDisableUdp, value: 'Y');
+                                } else if (value == 'tcp-only') {
+                                  await bind.mainSetOption(
+                                      key: kOptionAllowWebSocket, value: 'N');
+                                  await bind.mainSetOption(
+                                      key: kOptionDisableUdp, value: 'Y');
+                                } else {
+                                  await bind.mainSetOption(
+                                      key: kOptionAllowWebSocket, value: 'N');
+                                  await bind.mainSetOption(
+                                      key: kOptionDisableUdp, value: 'N');
+                                }
+                                setState(() {});
+                              },
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'auto', child: Text('Auto')),
+                          DropdownMenuItem(
+                              value: 'tcp-only', child: Text('TCP only')),
+                          DropdownMenuItem(
+                              value: 'websocket-only',
+                              child: Text('WebSocket only')),
+                        ],
+                      ),
+                    ),
+                    switchWidget(
+                        Icons.web_asset_outlined,
+                        'Use WebSocket',
+                        '${translate('websocket_tip')}\n\n${translate('server-oss-not-support-tip')}',
+                        kOptionAllowWebSocket),
+                  ],
+                ),
               if (!isWeb)
                 futureBuilder(
                   future: bind.mainIsUsingPublicServer(),
